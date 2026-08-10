@@ -4,8 +4,8 @@ Editor-neutral language tooling for PascalABC.NET.
 
 The repository contains two production projects:
 
-- `PascalABCNet.LanguageServices` — document storage and an editor-neutral adapter over the PascalABC.NET semantic and code-completion APIs;
-- `PascalABCNet.LanguageServer` — an LSP server using StreamJsonRpc and standard input/output transport.
+- `PascalABCNet.LanguageServices` - document storage and an editor-neutral adapter over the PascalABC.NET semantic and code-completion APIs;
+- `PascalABCNet.LanguageServer` - an LSP server using StreamJsonRpc and standard input/output transport.
 
 The PascalABC.NET compiler is included as the `pascalabcnet` Git submodule. The tooling repository does not contain a copied compiler source tree.
 
@@ -17,7 +17,7 @@ The PascalABC.NET compiler is included as the `pascalabcnet` Git submodule. The 
 ## Clone
 
 ```sh
-git clone --recurse-submodules <tooling-repository-url>
+git clone --recurse-submodules https://github.com/pascalabcnet/pascalabcnet-tooling.git
 ```
 
 For an existing clone:
@@ -68,3 +68,11 @@ PascalABC.NET (Git submodule)
 ```
 
 The language-service layer has no dependency on VS Code, LSP DTOs, WinForms, `ICSharpCode.TextEditor`, or the legacy PascalABC.NET workbench. IntelliSense operations are serialized because the underlying PascalABC.NET semantic services are process-global and are not safe for parallel execution.
+
+## Project status
+
+The current foundation provides document synchronization, completion after dot, hover, and signature help. Diagnostics, definition, references, and editor packaging are planned separately. See [CHANGELOG.md](CHANGELOG.md) for completed milestones.
+
+## License
+
+PascalABC.NET Tooling is licensed under the [GNU Lesser General Public License v3.0](LICENSE) (`LGPL-3.0-only`). PascalABC.NET itself is included as a Git submodule and is distributed under its own license terms.
