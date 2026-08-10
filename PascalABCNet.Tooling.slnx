@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="PascalABCNet.LanguageServices/PascalABCNet.LanguageServices.csproj" />
+  <Project Path="PascalABCNet.LanguageServer/PascalABCNet.LanguageServer.csproj" />
+  <Folder Name="/tests/">
+    <Project Path="HeadlessSmokeTest/HeadlessSmokeTest.csproj" />
+    <Project Path="LanguageServerSmokeTest/LanguageServerSmokeTest.csproj" />
+  </Folder>
+</Solution>
