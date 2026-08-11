@@ -11,6 +11,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Diagnostics, definition, references, and additional LSP capabilities.
 - Packaging and integration with the PascalABC.NET VS Code extension.
 
+## [0.1.2] - 2026-08-11
+
+### Added
+
+- Windows GitHub Actions CI for the complete Release build and both smoke-test projects.
+- Regression coverage for implementation-only dependencies, document close recovery, and simultaneous virtual documents.
+
+### Fixed
+
+- Dependency refresh now includes units referenced from `implementation uses` and propagates those changes transitively.
+- Closing a document now removes its unsaved global semantic cache entry, restores the disk model when available, and refreshes open dependents.
+- Non-file document URIs now receive stable unique synthetic Pascal file names instead of sharing `Untitled.pas`.
+
 ## [0.1.1] - 2026-08-11
 
 ### Added
@@ -50,6 +63,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - SPython-specific tooling code.
 - Named-pipe transport.
 
-[Unreleased]: https://github.com/pascalabcnet/pascalabcnet-tooling/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/pascalabcnet/pascalabcnet-tooling/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/pascalabcnet/pascalabcnet-tooling/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/pascalabcnet/pascalabcnet-tooling/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pascalabcnet/pascalabcnet-tooling/releases/tag/v0.1.0

@@ -46,6 +46,10 @@ The LSP test starts the server as a separate process and verifies initialize, in
 dotnet run --project LanguageServerSmokeTest/LanguageServerSmokeTest.csproj
 ```
 
+## Continuous integration
+
+GitHub Actions checks every pull request and every push to `main`. The workflow checks out the PascalABC.NET submodule, builds the complete solution on Windows with .NET 10, and runs both smoke-test projects.
+
 ## Run the language server
 
 ```sh

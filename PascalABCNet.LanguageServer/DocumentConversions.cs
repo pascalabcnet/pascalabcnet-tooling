@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.VisualStudio.LanguageServer.Protocol;
 using PascalABCNet.LanguageServices;
 
@@ -12,7 +14,13 @@ internal static class DocumentConversions
         var path = uri.IsFile ? uri.LocalPath : string.Empty;
         return string.Equals(Path.GetExtension(path), ".pas", StringComparison.OrdinalIgnoreCase)
             ? path
-            : "Untitled.pas";
+            : GetSyntheticFileName(uri);
+    }
+
+    private static string GetSyntheticFileName(Uri uri)
+    {
+        var uriHash = SHA256.HashData(Encoding.UTF8.GetBytes(uri.AbsoluteUri));
+        return $"Untitled_{Convert.ToHexString(uriHash)}.pas";
     }
 
     public static bool TryGetOffset(

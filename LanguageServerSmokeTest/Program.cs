@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using PascalABCNet.LanguageServer;
 
 const string source = """
 program HeadlessSmoke;
@@ -24,6 +25,21 @@ var serverAssembly = Environment.GetEnvironmentVariable("PABC_TOOLING_SERVER_ASS
         "Debug",
         "net10.0",
         "PascalABCNet.LanguageServer.dll");
+
+var firstSyntheticUri = new Uri("untitled:VirtualOne.pas");
+var secondSyntheticUri = new Uri("untitled:VirtualTwo.pas");
+var firstSyntheticFileName = DocumentConversions.GetFileName(firstSyntheticUri);
+var secondSyntheticFileName = DocumentConversions.GetFileName(secondSyntheticUri);
+Check(
+    firstSyntheticFileName.EndsWith(".pas", StringComparison.OrdinalIgnoreCase) &&
+    secondSyntheticFileName.EndsWith(".pas", StringComparison.OrdinalIgnoreCase),
+    "Synthetic document names preserve the Pascal extension");
+Check(
+    firstSyntheticFileName == DocumentConversions.GetFileName(firstSyntheticUri),
+    "Synthetic document names are stable for the same URI");
+Check(
+    !string.Equals(firstSyntheticFileName, secondSyntheticFileName, StringComparison.OrdinalIgnoreCase),
+    "Different non-file URIs receive different synthetic document names");
 Check(File.Exists(serverAssembly), $"Language server assembly exists: {serverAssembly}");
 
 using var process = new Process
@@ -125,6 +141,72 @@ Check(signature.RootElement.GetProperty("result").GetProperty("signatures")
         ?.Contains("Substring", StringComparison.OrdinalIgnoreCase) == true),
     "signature help describes Substring");
 Console.WriteLine("PASS signature help over stdio");
+
+const string firstVirtualSource = """
+program VirtualOne;
+type TFirstVirtual = class procedure FirstMember; end;
+procedure TFirstVirtual.FirstMember;
+begin
+end;
+var value: TFirstVirtual;
+begin
+  value.FirstMember;
+end.
+""";
+
+const string secondVirtualSource = """
+program VirtualTwo;
+type TSecondVirtual = class procedure SecondMember; end;
+procedure TSecondVirtual.SecondMember;
+begin
+end;
+var value: TSecondVirtual;
+begin
+  value.SecondMember;
+end.
+""";
+
+await WriteDidOpenAsync(
+    input,
+    firstSyntheticUri.AbsoluteUri,
+    firstVirtualSource,
+    version: 1,
+    timeout.Token);
+await WriteDidOpenAsync(
+    input,
+    secondSyntheticUri.AbsoluteUri,
+    secondVirtualSource,
+    version: 1,
+    timeout.Token);
+var firstVirtualOffset =
+    firstVirtualSource.IndexOf("value.", StringComparison.Ordinal) + "value.".Length;
+var secondVirtualOffset =
+    secondVirtualSource.IndexOf("value.", StringComparison.Ordinal) + "value.".Length;
+await WriteRequestAsync(
+    input,
+    18,
+    "textDocument/completion",
+    firstSyntheticUri.AbsoluteUri,
+    GetPosition(firstVirtualSource, firstVirtualOffset),
+    timeout.Token);
+using var firstVirtualCompletion = await ReadResponseAsync(output, 18, timeout.Token);
+await WriteRequestAsync(
+    input,
+    19,
+    "textDocument/completion",
+    secondSyntheticUri.AbsoluteUri,
+    GetPosition(secondVirtualSource, secondVirtualOffset),
+    timeout.Token);
+using var secondVirtualCompletion = await ReadResponseAsync(output, 19, timeout.Token);
+var firstVirtualLabels = GetCompletionLabels(firstVirtualCompletion);
+var secondVirtualLabels = GetCompletionLabels(secondVirtualCompletion);
+Check(
+    firstVirtualLabels.Contains("FirstMember") && !firstVirtualLabels.Contains("SecondMember"),
+    "First virtual document keeps its own semantic model");
+Check(
+    secondVirtualLabels.Contains("SecondMember") && !secondVirtualLabels.Contains("FirstMember"),
+    "Second virtual document keeps its own semantic model");
+Console.WriteLine("PASS simultaneous non-file documents over stdio");
 
 var dependencyDirectory = Path.Combine(Path.GetTempPath(), "PascalABCNet.Tooling.LspDependencyRegression");
 Directory.CreateDirectory(dependencyDirectory);
@@ -401,6 +483,122 @@ Check(!refreshedChainLabels.Contains("OldMember"),
     "Transitive LSP consumer drops stale OldMember after A changes");
 Console.WriteLine("PASS transitive dependency refresh over stdio");
 
+var implementationAFileName = Path.Combine(dependencyDirectory, "LspImplementationA.pas");
+var implementationBFileName = Path.Combine(dependencyDirectory, "LspImplementationB.pas");
+var implementationAUri = new Uri(implementationAFileName).AbsoluteUri;
+var implementationBUri = new Uri(implementationBFileName).AbsoluteUri;
+
+const string implementationASourceV1 = """
+unit LspImplementationA;
+interface
+type TImplementationDependency = class procedure OldMember; end;
+implementation
+procedure TImplementationDependency.OldMember;
+begin
+end;
+end.
+""";
+
+const string implementationASourceV2 = """
+unit LspImplementationA;
+interface
+type TImplementationDependency = class procedure NewMember; end;
+implementation
+procedure TImplementationDependency.NewMember;
+begin
+end;
+end.
+""";
+
+const string implementationBSource = """
+unit LspImplementationB;
+interface
+procedure Touch;
+implementation
+uses LspImplementationA;
+procedure Touch;
+var value: TImplementationDependency;
+begin
+  value.OldMember;
+end;
+end.
+""";
+
+File.WriteAllText(implementationAFileName, implementationASourceV1);
+File.WriteAllText(implementationBFileName, implementationBSource);
+await WriteDidOpenAsync(input, implementationAUri, implementationASourceV1, version: 1, timeout.Token);
+await WriteDidOpenAsync(input, implementationBUri, implementationBSource, version: 1, timeout.Token);
+
+var implementationCaretOffset =
+    implementationBSource.IndexOf("value.", StringComparison.Ordinal) + "value.".Length;
+var implementationPosition = GetPosition(implementationBSource, implementationCaretOffset);
+await WriteRequestAsync(
+    input,
+    14,
+    "textDocument/completion",
+    implementationBUri,
+    implementationPosition,
+    timeout.Token);
+using var initialImplementationCompletion = await ReadResponseAsync(output, 14, timeout.Token);
+Check(
+    GetCompletionLabels(initialImplementationCompletion).Contains("OldMember"),
+    "Implementation-only LSP consumer initially sees OldMember");
+
+File.WriteAllText(implementationAFileName, implementationASourceV2);
+await WriteDidChangeAsync(input, implementationAUri, implementationASourceV2, version: 2, timeout.Token);
+await WriteRequestAsync(
+    input,
+    15,
+    "textDocument/completion",
+    implementationBUri,
+    implementationPosition,
+    timeout.Token);
+using var refreshedImplementationCompletion = await ReadResponseAsync(output, 15, timeout.Token);
+var refreshedImplementationLabels = GetCompletionLabels(refreshedImplementationCompletion);
+Check(
+    refreshedImplementationLabels.Contains("NewMember"),
+    "Implementation-only LSP consumer sees NewMember after A changes");
+Check(
+    !refreshedImplementationLabels.Contains("OldMember"),
+    "Implementation-only LSP consumer drops stale OldMember after A changes");
+Console.WriteLine("PASS implementation uses dependency refresh over stdio");
+
+File.WriteAllText(dependencyFileName, dependencySourceV1);
+await WriteDidChangeAsync(input, dependencyUri, dependencySourceV3, version: 7, timeout.Token);
+await WriteRequestAsync(input, 16, "textDocument/completion", consumerUri, dependencyPosition, timeout.Token);
+using var completionBeforeDependencyClose = await ReadResponseAsync(output, 16, timeout.Token);
+var labelsBeforeDependencyClose = GetCompletionLabels(completionBeforeDependencyClose);
+Check(
+    labelsBeforeDependencyClose.Contains("Bar") && !labelsBeforeDependencyClose.Contains("Foo"),
+    "LSP consumer uses the unsaved dependency model before close");
+
+await WriteMessageAsync(input, new
+{
+    jsonrpc = "2.0",
+    method = "textDocument/didClose",
+    @params = new { textDocument = new { uri = dependencyUri } }
+}, timeout.Token);
+await WriteRequestAsync(input, 17, "textDocument/completion", consumerUri, dependencyPosition, timeout.Token);
+using var completionAfterDependencyClose = await ReadResponseAsync(output, 17, timeout.Token);
+var labelsAfterDependencyClose = GetCompletionLabels(completionAfterDependencyClose);
+Check(
+    labelsAfterDependencyClose.Contains("Foo"),
+    "LSP consumer returns to the dependency model stored on disk after close");
+Check(
+    !labelsAfterDependencyClose.Contains("Bar"),
+    "LSP consumer drops the unsaved dependency model after close");
+Console.WriteLine("PASS closing an unsaved dependency restores its disk model over stdio");
+
+foreach (var uri in new[] { implementationBUri, implementationAUri })
+{
+    await WriteMessageAsync(input, new
+    {
+        jsonrpc = "2.0",
+        method = "textDocument/didClose",
+        @params = new { textDocument = new { uri } }
+    }, timeout.Token);
+}
+
 foreach (var uri in new[] { chainCUri, chainBUri, chainAUri })
 {
     await WriteMessageAsync(input, new
@@ -417,12 +615,6 @@ await WriteMessageAsync(input, new
     method = "textDocument/didClose",
     @params = new { textDocument = new { uri = consumerUri } }
 }, timeout.Token);
-await WriteMessageAsync(input, new
-{
-    jsonrpc = "2.0",
-    method = "textDocument/didClose",
-    @params = new { textDocument = new { uri = dependencyUri } }
-}, timeout.Token);
 
 await WriteMessageAsync(input, new
 {
@@ -430,6 +622,16 @@ await WriteMessageAsync(input, new
     method = "textDocument/didClose",
     @params = new { textDocument = new { uri = documentUri } }
 }, timeout.Token);
+
+foreach (var uri in new[] { firstSyntheticUri.AbsoluteUri, secondSyntheticUri.AbsoluteUri })
+{
+    await WriteMessageAsync(input, new
+    {
+        jsonrpc = "2.0",
+        method = "textDocument/didClose",
+        @params = new { textDocument = new { uri } }
+    }, timeout.Token);
+}
 
 await WriteMessageAsync(input, new
 {

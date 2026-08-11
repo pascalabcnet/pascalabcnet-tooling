@@ -7,7 +7,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\PascalABCNet.LanguageServer\PascalABCNet.LanguageServer.csproj"
-                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\PascalABCNet.LanguageServer\PascalABCNet.LanguageServer.csproj" />
   </ItemGroup>
 </Project>

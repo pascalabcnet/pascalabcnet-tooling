@@ -69,8 +69,14 @@ public sealed class PascalLanguageService : IPascalLanguageService
         return ExecuteSerializedAsync(() =>
         {
             CancelPendingAnalysis(documentId);
+            Documents.TryGet(documentId, out var document);
             _states.Remove(documentId);
-            return Documents.Remove(documentId);
+            var removed = Documents.Remove(documentId);
+
+            if (document is not null)
+                RestoreClosedDocumentFromDisk(document);
+
+            return removed;
         }, cancellationToken);
     }
 
@@ -348,12 +354,64 @@ public sealed class PascalLanguageService : IPascalLanguageService
         }
     }
 
+    private void RestoreClosedDocumentFromDisk(DocumentSnapshot closedDocument)
+    {
+        RemoveCachedModule(closedDocument.FileName);
+
+        if (TryReadFile(closedDocument.FileName, out var diskText))
+        {
+            var diskConverter = _controller.Compile(
+                closedDocument.FileName,
+                diskText);
+            if (!diskConverter.is_compiled)
+                RemoveCachedModule(closedDocument.FileName);
+        }
+
+        RecompileOpenDependents(closedDocument);
+    }
+
+    private static void RemoveCachedModule(string fileName)
+    {
+        CodeCompletionController.comp_modules.Remove(fileName);
+
+        var normalizedFileName = NormalizeFileName(fileName);
+        if (!string.Equals(fileName, normalizedFileName, StringComparison.OrdinalIgnoreCase))
+            CodeCompletionController.comp_modules.Remove(normalizedFileName);
+    }
+
+    private static bool TryReadFile(string fileName, out string text)
+    {
+        text = string.Empty;
+        if (!File.Exists(fileName))
+            return false;
+
+        try
+        {
+            text = File.ReadAllText(fileName);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     private static IReadOnlySet<string> GetDirectDependencies(DomConverter domConverter)
     {
-        if (!domConverter.is_compiled || domConverter.visitor.entry_scope?.used_units is null)
+        if (!domConverter.is_compiled)
             return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        return domConverter.visitor.entry_scope.used_units
+        return new[]
+            {
+                domConverter.visitor.entry_scope?.used_units,
+                domConverter.visitor.impl_scope?.used_units
+            }
+            .Where(usedUnits => usedUnits is not null)
+            .SelectMany(usedUnits => usedUnits!)
             .Select(scope => scope.file_name)
             .Where(fileName => !string.IsNullOrWhiteSpace(fileName))
             .Select(fileName => NormalizeFileName(fileName!))

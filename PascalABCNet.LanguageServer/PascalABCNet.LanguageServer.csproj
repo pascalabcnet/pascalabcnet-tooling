@@ -15,4 +15,8 @@
   <ItemGroup>
     <ProjectReference Include="..\PascalABCNet.LanguageServices\PascalABCNet.LanguageServices.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="LanguageServerSmokeTest" />
+  </ItemGroup>
 </Project>

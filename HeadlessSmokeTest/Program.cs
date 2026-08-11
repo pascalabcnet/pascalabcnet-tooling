@@ -363,6 +363,62 @@ Check(
     "A stale queued version cannot roll back the latest document snapshot");
 Console.WriteLine("PASS queued updates coalesce to the latest semantic version");
 
+File.WriteAllText(dependencyFileName, dependencySourceV1);
+Check((await languageService.OpenOrUpdateDocumentAsync(
+    dependencyDocumentId,
+    dependencyFileName,
+    dependencySourceV2,
+    version: 6)).IsCompiled, "Unsaved dependency version compiled before close");
+var completionBeforeDependencyClose = await languageService.GetCompletionAfterDotAsync(
+    consumerDocumentId,
+    dependencyMemberOffset);
+Check(
+    completionBeforeDependencyClose.Any(item => item.Label == "Bar") &&
+    completionBeforeDependencyClose.All(item => item.Label != "Foo"),
+    "Open consumer uses the unsaved dependency model before close");
+
+Check(
+    await languageService.CloseDocumentAsync(dependencyDocumentId),
+    "Closing the unsaved dependency removes its open document");
+Check(
+    !languageService.Documents.TryGet(dependencyDocumentId, out _),
+    "Closed dependency is removed from document storage");
+var completionAfterDependencyClose = await languageService.GetCompletionAfterDotAsync(
+    consumerDocumentId,
+    dependencyMemberOffset);
+Check(
+    completionAfterDependencyClose.Any(item => item.Label == "Foo"),
+    "Open consumer returns to the dependency model stored on disk after close");
+Check(
+    completionAfterDependencyClose.All(item => item.Label != "Bar"),
+    "Open consumer drops the unsaved dependency model after close");
+Console.WriteLine("PASS closing an unsaved dependency restores its disk model");
+
+var unsavedOnlyFileName = Path.Combine(
+    dependencyDirectory,
+    $"UnsavedOnly_{Guid.NewGuid():N}.pas");
+var unsavedOnlyDocumentId = new Uri(unsavedOnlyFileName).AbsoluteUri;
+const string unsavedOnlySource = """
+program UnsavedOnly;
+begin
+end.
+""";
+Check((await languageService.OpenOrUpdateDocumentAsync(
+    unsavedOnlyDocumentId,
+    unsavedOnlyFileName,
+    unsavedOnlySource,
+    version: 1)).IsCompiled, "Unsaved-only document compiled");
+Check(
+    CodeCompletionController.comp_modules[unsavedOnlyFileName] is DomConverter,
+    "Unsaved-only document is present in the global semantic cache while open");
+Check(
+    await languageService.CloseDocumentAsync(unsavedOnlyDocumentId),
+    "Unsaved-only document closed");
+Check(
+    CodeCompletionController.comp_modules[unsavedOnlyFileName] is null,
+    "Closing a document without a disk file removes its global semantic cache entry");
+Console.WriteLine("PASS closing an unsaved-only document clears its semantic cache");
+
 var chainAFileName = Path.Combine(dependencyDirectory, "ChainA.pas");
 var chainBFileName = Path.Combine(dependencyDirectory, "ChainB.pas");
 var chainCFileName = Path.Combine(dependencyDirectory, "ChainC.pas");
@@ -462,6 +518,113 @@ Check(
     chainCompletionAfterChange.All(item => item.Label != "OldMember"),
     "Transitive consumer drops stale OldMember after dependency A changes");
 Console.WriteLine("PASS transitive dependency-aware semantic refresh");
+
+var implementationAFileName = Path.Combine(dependencyDirectory, "ImplementationA.pas");
+var implementationBFileName = Path.Combine(dependencyDirectory, "ImplementationB.pas");
+var implementationCFileName = Path.Combine(dependencyDirectory, "ImplementationC.pas");
+var implementationADocumentId = new Uri(implementationAFileName).AbsoluteUri;
+var implementationBDocumentId = new Uri(implementationBFileName).AbsoluteUri;
+var implementationCDocumentId = new Uri(implementationCFileName).AbsoluteUri;
+
+const string implementationASourceV1 = """
+unit ImplementationA;
+interface
+type TImplementationDependency = class procedure OldMember; end;
+implementation
+procedure TImplementationDependency.OldMember;
+begin
+end;
+end.
+""";
+
+const string implementationASourceV2 = """
+unit ImplementationA;
+interface
+type TImplementationDependency = class procedure NewMember; end;
+implementation
+procedure TImplementationDependency.NewMember;
+begin
+end;
+end.
+""";
+
+const string implementationBSource = """
+unit ImplementationB;
+interface
+procedure Touch;
+implementation
+uses ImplementationA;
+procedure Touch;
+var value: TImplementationDependency;
+begin
+  value.OldMember;
+end;
+end.
+""";
+
+const string implementationCSource = """
+program ImplementationC;
+uses ImplementationB;
+begin
+  Touch;
+end.
+""";
+
+File.WriteAllText(implementationAFileName, implementationASourceV1);
+File.WriteAllText(implementationBFileName, implementationBSource);
+File.WriteAllText(implementationCFileName, implementationCSource);
+
+Check((await languageService.OpenOrUpdateDocumentAsync(
+    implementationADocumentId,
+    implementationAFileName,
+    implementationASourceV1,
+    version: 1)).IsCompiled, "Implementation dependency A compiled");
+Check((await languageService.OpenOrUpdateDocumentAsync(
+    implementationBDocumentId,
+    implementationBFileName,
+    implementationBSource,
+    version: 1)).IsCompiled, "Implementation-only consumer B compiled");
+Check((await languageService.OpenOrUpdateDocumentAsync(
+    implementationCDocumentId,
+    implementationCFileName,
+    implementationCSource,
+    version: 1)).IsCompiled, "Transitive implementation consumer C compiled");
+
+var implementationMemberOffset =
+    implementationBSource.IndexOf("value.", StringComparison.Ordinal) + "value.".Length;
+Check(
+    (await languageService.GetCompletionAfterDotAsync(
+        implementationBDocumentId,
+        implementationMemberOffset)).Any(item => item.Label == "OldMember"),
+    "Implementation-only consumer initially contains OldMember");
+var implementationCConverterBefore =
+    CodeCompletionController.comp_modules[implementationCFileName] as DomConverter;
+Check(implementationCConverterBefore is not null, "Transitive implementation consumer has a semantic model");
+
+File.WriteAllText(implementationAFileName, implementationASourceV2);
+Check((await languageService.OpenOrUpdateDocumentAsync(
+    implementationADocumentId,
+    implementationAFileName,
+    implementationASourceV2,
+    version: 2)).IsCompiled, "Implementation dependency A version 2 compiled");
+
+var implementationCompletionAfterChange = await languageService.GetCompletionAfterDotAsync(
+    implementationBDocumentId,
+    implementationMemberOffset);
+Check(
+    implementationCompletionAfterChange.Any(item => item.Label == "NewMember"),
+    "Implementation-only consumer refreshes NewMember after dependency A changes");
+Check(
+    implementationCompletionAfterChange.All(item => item.Label != "OldMember"),
+    "Implementation-only consumer drops stale OldMember after dependency A changes");
+var implementationCConverterAfter =
+    CodeCompletionController.comp_modules[implementationCFileName] as DomConverter;
+Check(
+    implementationCConverterAfter is not null &&
+    !ReferenceEquals(implementationCConverterBefore, implementationCConverterAfter),
+    "Implementation-only dependency refresh propagates transitively to C");
+Console.WriteLine("PASS implementation uses dependency refresh");
+Console.WriteLine("PASS transitive implementation uses dependency refresh");
 
 var invalidAnalysis = await languageService.OpenOrUpdateDocumentAsync(
     "file:///Broken.pas",
