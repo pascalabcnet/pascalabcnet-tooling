@@ -35,7 +35,7 @@ internal sealed class PascalLanguageServerTarget
                     TextDocumentSync = new TextDocumentSyncOptions
                     {
                         OpenClose = true,
-                        Change = TextDocumentSyncKind.Full,
+                        Change = TextDocumentSyncKind.Incremental,
                         Save = new SaveOptions { IncludeText = false }
                     },
                     CompletionProvider = new CompletionOptions
@@ -87,14 +87,21 @@ internal sealed class PascalLanguageServerTarget
         CancellationToken cancellationToken) =>
         _dispatcher.RunAsync(async () =>
         {
-            var change = notification.ContentChanges.LastOrDefault();
-            if (change is null)
+            var documentId = DocumentConversions.GetDocumentId(notification.TextDocument.Uri);
+            if (!_languageService.Documents.TryGet(documentId, out var document) ||
+                document is null ||
+                !DocumentConversions.TryApplyContentChanges(
+                    document.Text,
+                    notification.ContentChanges,
+                    out var updatedText))
+            {
                 return;
+            }
 
-            await _languageService.OpenOrUpdateDocumentAsync(
-                DocumentConversions.GetDocumentId(notification.TextDocument.Uri),
+            await _languageService.QueueDocumentUpdateAsync(
+                documentId,
                 DocumentConversions.GetFileName(notification.TextDocument.Uri),
-                change.Text,
+                updatedText,
                 notification.TextDocument.Version,
                 cancellationToken).ConfigureAwait(false);
         }, cancellationToken);

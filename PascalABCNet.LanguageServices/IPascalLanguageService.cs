@@ -11,6 +11,13 @@ public interface IPascalLanguageService
         int? version = null,
         CancellationToken cancellationToken = default);
 
+    Task QueueDocumentUpdateAsync(
+        string documentId,
+        string fileName,
+        string text,
+        int? version = null,
+        CancellationToken cancellationToken = default);
+
     Task<bool> CloseDocumentAsync(
         string documentId,
         CancellationToken cancellationToken = default);

@@ -15,14 +15,15 @@ begin
 end.
 """;
 
-var repositoryRoot = FindRepositoryRoot(AppContext.BaseDirectory);
-var serverAssembly = Path.Combine(
-    repositoryRoot,
-    "PascalABCNet.LanguageServer",
-    "bin",
-    "Debug",
-    "net10.0",
-    "PascalABCNet.LanguageServer.dll");
+var repositoryRoot = FindRepositoryRoot(Environment.CurrentDirectory);
+var serverAssembly = Environment.GetEnvironmentVariable("PABC_TOOLING_SERVER_ASSEMBLY") ??
+    Path.Combine(
+        repositoryRoot,
+        "PascalABCNet.LanguageServer",
+        "bin",
+        "Debug",
+        "net10.0",
+        "PascalABCNet.LanguageServer.dll");
 Check(File.Exists(serverAssembly), $"Language server assembly exists: {serverAssembly}");
 
 using var process = new Process
@@ -65,6 +66,9 @@ using var initialize = await ReadResponseAsync(output, 1, timeout.Token);
 Check(initialize.RootElement.GetProperty("result").GetProperty("capabilities")
     .GetProperty("completionProvider").GetProperty("triggerCharacters")[0].GetString() == ".",
     "initialize advertises completion after dot");
+Check(initialize.RootElement.GetProperty("result").GetProperty("capabilities")
+    .GetProperty("textDocumentSync").GetProperty("change").GetInt32() == 2,
+    "initialize advertises incremental document synchronization");
 Console.WriteLine("PASS initialize over stdio");
 
 await WriteMessageAsync(input, new
@@ -122,6 +126,304 @@ Check(signature.RootElement.GetProperty("result").GetProperty("signatures")
     "signature help describes Substring");
 Console.WriteLine("PASS signature help over stdio");
 
+var dependencyDirectory = Path.Combine(Path.GetTempPath(), "PascalABCNet.Tooling.LspDependencyRegression");
+Directory.CreateDirectory(dependencyDirectory);
+var dependencyFileName = Path.Combine(dependencyDirectory, "LspDependencyA.pas");
+var consumerFileName = Path.Combine(dependencyDirectory, "LspDependencyB.pas");
+var dependencyUri = new Uri(dependencyFileName).AbsoluteUri;
+var consumerUri = new Uri(consumerFileName).AbsoluteUri;
+
+const string dependencySourceV1 = """
+unit LspDependencyA;
+interface
+type
+  TLspDependency = class
+    procedure Foo;
+  end;
+implementation
+procedure TLspDependency.Foo;
+begin
+end;
+end.
+""";
+
+const string dependencyBrokenSource = """
+unit LspDependencyA;
+interface
+type
+  TLspDependency = class
+    procedure
+  end;
+implementation
+end.
+""";
+
+const string dependencySourceV3 = """
+unit LspDependencyA;
+interface
+type
+  TLspDependency = class
+    procedure Bar;
+  end;
+implementation
+procedure TLspDependency.Bar;
+begin
+end;
+end.
+""";
+
+const string dependencySourceV4 = """
+unit LspDependencyA;
+interface
+type
+  TLspDependency = class
+    procedure Baz;
+  end;
+implementation
+procedure TLspDependency.Baz;
+begin
+end;
+end.
+""";
+
+const string dependencySourceV5 = """
+unit LspDependencyA;
+interface
+type
+  TLspDependency = class
+    procedure LongMember;
+  end;
+implementation
+procedure TLspDependency.LongMember;
+begin
+end;
+end.
+""";
+
+const string dependencySourceV6 = """
+unit LspDependencyA;
+interface
+type
+  TLspDependency = class
+    procedure FinalMember;
+  end;
+implementation
+procedure TLspDependency.FinalMember;
+begin
+end;
+end.
+""";
+
+const string consumerSource = """
+program LspDependencyB;
+uses LspDependencyA;
+var value: TLspDependency;
+begin
+  value.Foo;
+end.
+""";
+
+File.WriteAllText(dependencyFileName, dependencySourceV1);
+File.WriteAllText(consumerFileName, consumerSource);
+await WriteDidOpenAsync(input, dependencyUri, dependencySourceV1, version: 1, timeout.Token);
+await WriteDidOpenAsync(input, consumerUri, consumerSource, version: 1, timeout.Token);
+
+var dependencyCaretOffset = consumerSource.IndexOf("value.", StringComparison.Ordinal) + "value.".Length;
+var dependencyPosition = GetPosition(consumerSource, dependencyCaretOffset);
+await WriteRequestAsync(input, 5, "textDocument/completion", consumerUri, dependencyPosition, timeout.Token);
+using var initialDependencyCompletion = await ReadResponseAsync(output, 5, timeout.Token);
+Check(
+    GetCompletionLabels(initialDependencyCompletion).Contains("Foo"),
+    "LSP consumer initially sees Foo from dependency A");
+
+File.WriteAllText(dependencyFileName, dependencyBrokenSource);
+await WriteDidChangeAsync(input, dependencyUri, dependencyBrokenSource, version: 2, timeout.Token);
+File.WriteAllText(dependencyFileName, dependencySourceV3);
+await WriteDidChangeAsync(input, dependencyUri, dependencySourceV3, version: 3, timeout.Token);
+
+await WriteRequestAsync(input, 6, "textDocument/completion", consumerUri, dependencyPosition, timeout.Token);
+using var refreshedDependencyCompletion = await ReadResponseAsync(output, 6, timeout.Token);
+var refreshedLabels = GetCompletionLabels(refreshedDependencyCompletion);
+Check(refreshedLabels.Contains("Bar"), "LSP consumer sees Bar after burst update of A");
+Check(!refreshedLabels.Contains("Foo"), "LSP consumer drops stale Foo after burst update of A");
+
+await WriteDidChangeAsync(input, dependencyUri, dependencyBrokenSource, version: 2, timeout.Token);
+await WriteRequestAsync(input, 7, "textDocument/completion", consumerUri, dependencyPosition, timeout.Token);
+using var completionAfterStaleVersion = await ReadResponseAsync(output, 7, timeout.Token);
+var labelsAfterStaleVersion = GetCompletionLabels(completionAfterStaleVersion);
+Check(labelsAfterStaleVersion.Contains("Bar") && !labelsAfterStaleVersion.Contains("Foo"),
+    "Stale LSP document version cannot roll semantic state back");
+
+var barOffsets = FindAllOffsets(dependencySourceV3, "Bar");
+Check(barOffsets.Count == 2, "Dependency source contains two Bar ranges to update");
+File.WriteAllText(dependencyFileName, dependencySourceV4);
+await WriteDidChangeRangesAsync(
+    input,
+    dependencyUri,
+    version: 4,
+    barOffsets.Select(offset =>
+    {
+        var start = GetPosition(dependencySourceV3, offset);
+        var end = GetPosition(dependencySourceV3, offset + "Bar".Length);
+        return (start, end, "Baz");
+    }).ToArray(),
+    timeout.Token);
+await WriteRequestAsync(input, 10, "textDocument/completion", consumerUri, dependencyPosition, timeout.Token);
+using var completionAfterIncrementalChanges = await ReadResponseAsync(output, 10, timeout.Token);
+var labelsAfterIncrementalChanges = GetCompletionLabels(completionAfterIncrementalChanges);
+Check(labelsAfterIncrementalChanges.Contains("Baz"),
+    "LSP consumer sees Baz after incremental range changes in A");
+Check(!labelsAfterIncrementalChanges.Contains("Foo") && !labelsAfterIncrementalChanges.Contains("Bar"),
+    "Incremental range changes remove superseded dependency members");
+
+var firstBazOffset = dependencySourceV4.IndexOf("Baz", StringComparison.Ordinal);
+var sourceAfterFirstVariableLengthChange = string.Concat(
+    dependencySourceV4.AsSpan(0, firstBazOffset),
+    "LongMember",
+    dependencySourceV4.AsSpan(firstBazOffset + "Baz".Length));
+var secondBazOffset = sourceAfterFirstVariableLengthChange.IndexOf("Baz", StringComparison.Ordinal);
+File.WriteAllText(dependencyFileName, dependencySourceV5);
+await WriteDidChangeRangesAsync(
+    input,
+    dependencyUri,
+    version: 5,
+    new[]
+    {
+        (
+            GetPosition(dependencySourceV4, firstBazOffset),
+            GetPosition(dependencySourceV4, firstBazOffset + "Baz".Length),
+            "LongMember"),
+        (
+            GetPosition(sourceAfterFirstVariableLengthChange, secondBazOffset),
+            GetPosition(sourceAfterFirstVariableLengthChange, secondBazOffset + "Baz".Length),
+            "LongMember")
+    },
+    timeout.Token);
+await WriteRequestAsync(input, 11, "textDocument/completion", consumerUri, dependencyPosition, timeout.Token);
+using var completionAfterVariableLengthChanges = await ReadResponseAsync(output, 11, timeout.Token);
+var labelsAfterVariableLengthChanges = GetCompletionLabels(completionAfterVariableLengthChanges);
+Check(labelsAfterVariableLengthChanges.Contains("LongMember"),
+    "Sequential incremental ranges are based on the text produced by the previous change");
+Check(!labelsAfterVariableLengthChanges.Contains("Baz"),
+    "Variable-length incremental ranges remove the previous member");
+
+await WriteDidChangeRangesAsync(
+    input,
+    dependencyUri,
+    version: 6,
+    new[] { ((Line: 999, Character: 0), (Line: 999, Character: 1), "corrupt") },
+    timeout.Token);
+await WriteRequestAsync(input, 12, "textDocument/completion", consumerUri, dependencyPosition, timeout.Token);
+using var completionAfterInvalidRange = await ReadResponseAsync(output, 12, timeout.Token);
+Check(GetCompletionLabels(completionAfterInvalidRange).Contains("LongMember"),
+    "An invalid incremental range does not corrupt the current document snapshot");
+
+File.WriteAllText(dependencyFileName, dependencySourceV6);
+await WriteDidChangeAsync(input, dependencyUri, dependencySourceV6, version: 6, timeout.Token);
+await WriteRequestAsync(input, 13, "textDocument/completion", consumerUri, dependencyPosition, timeout.Token);
+using var completionAfterInvalidRangeRecovery = await ReadResponseAsync(output, 13, timeout.Token);
+var labelsAfterInvalidRangeRecovery = GetCompletionLabels(completionAfterInvalidRangeRecovery);
+Check(labelsAfterInvalidRangeRecovery.Contains("FinalMember") &&
+      !labelsAfterInvalidRangeRecovery.Contains("LongMember"),
+    "A valid update is accepted after an invalid range with the same version was rejected");
+Console.WriteLine("PASS dependency refresh and burst updates over stdio");
+Console.WriteLine("PASS incremental range synchronization over stdio");
+
+var chainAFileName = Path.Combine(dependencyDirectory, "LspChainA.pas");
+var chainBFileName = Path.Combine(dependencyDirectory, "LspChainB.pas");
+var chainCFileName = Path.Combine(dependencyDirectory, "LspChainC.pas");
+var chainAUri = new Uri(chainAFileName).AbsoluteUri;
+var chainBUri = new Uri(chainBFileName).AbsoluteUri;
+var chainCUri = new Uri(chainCFileName).AbsoluteUri;
+
+const string chainASourceV1 = """
+unit LspChainA;
+interface
+type TBase = class procedure OldMember; end;
+implementation
+procedure TBase.OldMember;
+begin
+end;
+end.
+""";
+
+const string chainASourceV2 = """
+unit LspChainA;
+interface
+type TBase = class procedure NewMember; end;
+implementation
+procedure TBase.NewMember;
+begin
+end;
+end.
+""";
+
+const string chainBSource = """
+unit LspChainB;
+interface
+uses LspChainA;
+type TDerived = class(TBase) end;
+implementation
+end.
+""";
+
+const string chainCSource = """
+program LspChainC;
+uses LspChainB;
+var value: TDerived;
+begin
+  value.OldMember;
+end.
+""";
+
+File.WriteAllText(chainAFileName, chainASourceV1);
+File.WriteAllText(chainBFileName, chainBSource);
+File.WriteAllText(chainCFileName, chainCSource);
+await WriteDidOpenAsync(input, chainAUri, chainASourceV1, version: 1, timeout.Token);
+await WriteDidOpenAsync(input, chainBUri, chainBSource, version: 1, timeout.Token);
+await WriteDidOpenAsync(input, chainCUri, chainCSource, version: 1, timeout.Token);
+
+var chainCaretOffset = chainCSource.IndexOf("value.", StringComparison.Ordinal) + "value.".Length;
+var chainPosition = GetPosition(chainCSource, chainCaretOffset);
+await WriteRequestAsync(input, 8, "textDocument/completion", chainCUri, chainPosition, timeout.Token);
+using var initialChainCompletion = await ReadResponseAsync(output, 8, timeout.Token);
+Check(GetCompletionLabels(initialChainCompletion).Contains("OldMember"),
+    "Transitive LSP consumer initially sees OldMember");
+
+File.WriteAllText(chainAFileName, chainASourceV2);
+await WriteDidChangeAsync(input, chainAUri, chainASourceV2, version: 2, timeout.Token);
+await WriteRequestAsync(input, 9, "textDocument/completion", chainCUri, chainPosition, timeout.Token);
+using var refreshedChainCompletion = await ReadResponseAsync(output, 9, timeout.Token);
+var refreshedChainLabels = GetCompletionLabels(refreshedChainCompletion);
+Check(refreshedChainLabels.Contains("NewMember"),
+    "Transitive LSP consumer sees NewMember after A changes");
+Check(!refreshedChainLabels.Contains("OldMember"),
+    "Transitive LSP consumer drops stale OldMember after A changes");
+Console.WriteLine("PASS transitive dependency refresh over stdio");
+
+foreach (var uri in new[] { chainCUri, chainBUri, chainAUri })
+{
+    await WriteMessageAsync(input, new
+    {
+        jsonrpc = "2.0",
+        method = "textDocument/didClose",
+        @params = new { textDocument = new { uri } }
+    }, timeout.Token);
+}
+
+await WriteMessageAsync(input, new
+{
+    jsonrpc = "2.0",
+    method = "textDocument/didClose",
+    @params = new { textDocument = new { uri = consumerUri } }
+}, timeout.Token);
+await WriteMessageAsync(input, new
+{
+    jsonrpc = "2.0",
+    method = "textDocument/didClose",
+    @params = new { textDocument = new { uri = dependencyUri } }
+}, timeout.Token);
+
 await WriteMessageAsync(input, new
 {
     jsonrpc = "2.0",
@@ -132,10 +434,10 @@ await WriteMessageAsync(input, new
 await WriteMessageAsync(input, new
 {
     jsonrpc = "2.0",
-    id = 5,
+    id = 20,
     method = "shutdown"
 }, timeout.Token);
-using var shutdown = await ReadResponseAsync(output, 5, timeout.Token);
+using var shutdown = await ReadResponseAsync(output, 20, timeout.Token);
 Check(shutdown.RootElement.TryGetProperty("result", out var shutdownResult) &&
       shutdownResult.ValueKind == JsonValueKind.Null,
     "shutdown returned null result");
@@ -146,6 +448,93 @@ var errorOutput = await process.StandardError.ReadToEndAsync(timeout.Token);
 Check(process.ExitCode == 0, $"Language server exited cleanly. stderr: {errorOutput}");
 Console.WriteLine("PASS shutdown and exit over stdio");
 Console.WriteLine("All LSP smoke checks passed.");
+
+static async Task WriteDidOpenAsync(
+    Stream stream,
+    string documentUri,
+    string text,
+    int version,
+    CancellationToken cancellationToken)
+{
+    await WriteMessageAsync(stream, new
+    {
+        jsonrpc = "2.0",
+        method = "textDocument/didOpen",
+        @params = new
+        {
+            textDocument = new { uri = documentUri, languageId = "pascal", version, text }
+        }
+    }, cancellationToken);
+}
+
+static async Task WriteDidChangeAsync(
+    Stream stream,
+    string documentUri,
+    string text,
+    int version,
+    CancellationToken cancellationToken)
+{
+    await WriteMessageAsync(stream, new
+    {
+        jsonrpc = "2.0",
+        method = "textDocument/didChange",
+        @params = new
+        {
+            textDocument = new { uri = documentUri, version },
+            contentChanges = new[] { new { text } }
+        }
+    }, cancellationToken);
+}
+
+static async Task WriteDidChangeRangesAsync(
+    Stream stream,
+    string documentUri,
+    int version,
+    IReadOnlyList<((int Line, int Character) Start, (int Line, int Character) End, string Text)> changes,
+    CancellationToken cancellationToken)
+{
+    var contentChanges = changes.Select(change => new
+    {
+        range = new
+        {
+            start = new { line = change.Start.Line, character = change.Start.Character },
+            end = new { line = change.End.Line, character = change.End.Character }
+        },
+        text = change.Text
+    }).ToArray();
+
+    await WriteMessageAsync(stream, new
+    {
+        jsonrpc = "2.0",
+        method = "textDocument/didChange",
+        @params = new
+        {
+            textDocument = new { uri = documentUri, version },
+            contentChanges
+        }
+    }, cancellationToken);
+}
+
+static IReadOnlyList<int> FindAllOffsets(string text, string value)
+{
+    var offsets = new List<int>();
+    for (var offset = text.IndexOf(value, StringComparison.Ordinal);
+         offset >= 0;
+         offset = text.IndexOf(value, offset + value.Length, StringComparison.Ordinal))
+    {
+        offsets.Add(offset);
+    }
+
+    return offsets;
+}
+
+static HashSet<string> GetCompletionLabels(JsonDocument response) =>
+    response.RootElement.GetProperty("result").GetProperty("items")
+        .EnumerateArray()
+        .Select(item => item.GetProperty("label").GetString())
+        .Where(label => label is not null)
+        .Select(label => label!)
+        .ToHashSet(StringComparer.Ordinal);
 
 static async Task WriteRequestAsync(
     Stream stream,

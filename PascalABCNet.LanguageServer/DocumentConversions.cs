@@ -37,4 +37,47 @@ internal static class DocumentConversions
             return false;
         }
     }
+
+    public static bool TryApplyContentChanges(
+        string originalText,
+        IEnumerable<TextDocumentContentChangeEvent> changes,
+        out string updatedText)
+    {
+        ArgumentNullException.ThrowIfNull(originalText);
+        ArgumentNullException.ThrowIfNull(changes);
+
+        updatedText = originalText;
+        try
+        {
+            foreach (var change in changes)
+            {
+                if (change.Range is null)
+                {
+                    updatedText = change.Text;
+                    continue;
+                }
+
+                var start = TextCoordinates.GetOffset(
+                    updatedText,
+                    new TextPosition((int)change.Range.Start.Line, (int)change.Range.Start.Character));
+                var end = TextCoordinates.GetOffset(
+                    updatedText,
+                    new TextPosition((int)change.Range.End.Line, (int)change.Range.End.Character));
+                if (end < start)
+                    return false;
+
+                updatedText = string.Concat(
+                    updatedText.AsSpan(0, start),
+                    change.Text,
+                    updatedText.AsSpan(end));
+            }
+
+            return true;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            updatedText = originalText;
+            return false;
+        }
+    }
 }

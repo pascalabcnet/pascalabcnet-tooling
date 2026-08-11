@@ -6,12 +6,15 @@ namespace PascalABCNet.LanguageServices;
 
 public sealed class PascalLanguageService : IPascalLanguageService
 {
+    private static readonly TimeSpan AnalysisDebounce = TimeSpan.FromMilliseconds(200);
     private static readonly SemaphoreSlim SemanticGate = new(1, 1);
 
     private readonly string _documentationLanguageIso;
     private readonly ILanguage _language;
     private readonly CodeCompletionController _controller = new();
     private readonly Dictionary<string, DocumentState> _states = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, CancellationTokenSource> _pendingAnalyses = new(StringComparer.Ordinal);
+    private readonly object _pendingAnalysesSync = new();
 
     public PascalLanguageService(string documentationLanguageIso = "en")
     {
@@ -44,8 +47,10 @@ public sealed class PascalLanguageService : IPascalLanguageService
         return ExecuteSerializedAsync(() =>
         {
             var document = Documents.Set(documentId, fileName, text, version);
-            var domConverter = _controller.Compile(fileName, text);
-            _states[documentId] = new DocumentState(document, domConverter);
+            var domConverter = CompileAndStore(document);
+
+            if (domConverter.is_compiled)
+                RecompileOpenDependents(document);
 
             return new DocumentAnalysis(
                 documentId,
@@ -63,8 +68,51 @@ public sealed class PascalLanguageService : IPascalLanguageService
 
         return ExecuteSerializedAsync(() =>
         {
+            CancelPendingAnalysis(documentId);
             _states.Remove(documentId);
             return Documents.Remove(documentId);
+        }, cancellationToken);
+    }
+
+    public Task QueueDocumentUpdateAsync(
+        string documentId,
+        string fileName,
+        string text,
+        int? version = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateDocument(documentId, fileName, text);
+
+        return ExecuteSerializedAsync(() =>
+        {
+            if (Documents.TryGet(documentId, out var currentDocument) &&
+                currentDocument?.Version is int currentVersion &&
+                version is int incomingVersion &&
+                incomingVersion <= currentVersion)
+            {
+                return true;
+            }
+
+            var document = Documents.Set(documentId, fileName, text, version);
+
+            if (_states.TryGetValue(documentId, out var state))
+            {
+                _states[documentId] = state with
+                {
+                    Document = document,
+                    IsStale = true,
+                    IsDirty = true
+                };
+                ScheduleAnalysis(document);
+            }
+            else
+            {
+                var domConverter = CompileAndStore(document);
+                if (domConverter.is_compiled)
+                    RecompileOpenDependents(document);
+            }
+
+            return true;
         }, cancellationToken);
     }
 
@@ -216,9 +264,207 @@ public sealed class PascalLanguageService : IPascalLanguageService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(documentId);
 
+        EnsureDirtyDocumentsFresh();
+
         return _states.TryGetValue(documentId, out var state) && state.DomConverter.is_compiled
             ? state
             : null;
+    }
+
+    private DomConverter CompileAndStore(DocumentSnapshot document)
+    {
+        var domConverter = _controller.Compile(document.FileName, document.Text);
+
+        if (domConverter.is_compiled)
+        {
+            var generation = _states.TryGetValue(document.DocumentId, out var previousState)
+                ? previousState.Generation + 1
+                : 1;
+            _states[document.DocumentId] = new DocumentState(
+                document,
+                domConverter,
+                GetDirectDependencies(domConverter),
+                generation,
+                IsStale: false,
+                IsDirty: false,
+                LastConversionError: null);
+        }
+        else if (_states.TryGetValue(document.DocumentId, out var lastSuccessfulState) &&
+                 lastSuccessfulState.DomConverter.is_compiled)
+        {
+            _states[document.DocumentId] = lastSuccessfulState with
+            {
+                Document = document,
+                IsStale = true,
+                IsDirty = false,
+                LastConversionError = domConverter.LastConversionError?.ToString()
+            };
+        }
+        else
+        {
+            _states[document.DocumentId] = new DocumentState(
+                document,
+                domConverter,
+                GetDirectDependencies(domConverter),
+                Generation: 0,
+                IsStale: true,
+                IsDirty: false,
+                LastConversionError: domConverter.LastConversionError?.ToString());
+        }
+
+        return domConverter;
+    }
+
+    private void RecompileOpenDependents(DocumentSnapshot changedDocument)
+    {
+        var changedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            NormalizeFileName(changedDocument.FileName)
+        };
+        var rebuiltDocuments = new HashSet<string>(StringComparer.Ordinal)
+        {
+            changedDocument.DocumentId
+        };
+
+        while (true)
+        {
+            var dependents = _states.Values
+                .Where(state =>
+                    !rebuiltDocuments.Contains(state.Document.DocumentId) &&
+                    state.Dependencies.Any(changedFiles.Contains))
+                .ToArray();
+
+            if (dependents.Length == 0)
+                return;
+
+            foreach (var dependent in dependents)
+            {
+                rebuiltDocuments.Add(dependent.Document.DocumentId);
+                var domConverter = CompileAndStore(dependent.Document);
+
+                if (domConverter.is_compiled)
+                    changedFiles.Add(NormalizeFileName(dependent.Document.FileName));
+            }
+        }
+    }
+
+    private static IReadOnlySet<string> GetDirectDependencies(DomConverter domConverter)
+    {
+        if (!domConverter.is_compiled || domConverter.visitor.entry_scope?.used_units is null)
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        return domConverter.visitor.entry_scope.used_units
+            .Select(scope => scope.file_name)
+            .Where(fileName => !string.IsNullOrWhiteSpace(fileName))
+            .Select(fileName => NormalizeFileName(fileName!))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeFileName(string fileName) => Path.GetFullPath(fileName);
+
+    private void EnsureDirtyDocumentsFresh()
+    {
+        while (true)
+        {
+            var dirtyStates = _states.Values.Where(state => state.IsDirty).ToArray();
+            if (dirtyStates.Length == 0)
+                return;
+
+            var dirtyFileNames = dirtyStates
+                .Select(state => NormalizeFileName(state.Document.FileName))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var state = dirtyStates.FirstOrDefault(candidate =>
+                            !candidate.Dependencies.Any(dirtyFileNames.Contains))
+                        ?? dirtyStates[0];
+
+            CancelPendingAnalysis(state.Document.DocumentId);
+            var domConverter = CompileAndStore(state.Document);
+            if (domConverter.is_compiled)
+                RecompileOpenDependents(state.Document);
+        }
+    }
+
+    private void ScheduleAnalysis(DocumentSnapshot document)
+    {
+        var cancellation = new CancellationTokenSource();
+
+        lock (_pendingAnalysesSync)
+        {
+            if (_pendingAnalyses.TryGetValue(document.DocumentId, out var previous))
+                previous.Cancel();
+            _pendingAnalyses[document.DocumentId] = cancellation;
+        }
+
+        _ = AnalyzeAfterDebounceAsync(document, cancellation);
+    }
+
+    private async Task AnalyzeAfterDebounceAsync(
+        DocumentSnapshot scheduledDocument,
+        CancellationTokenSource cancellation)
+    {
+        try
+        {
+            await Task.Delay(AnalysisDebounce, cancellation.Token).ConfigureAwait(false);
+            await ExecuteSerializedAsync(() =>
+            {
+                if (!Documents.TryGet(scheduledDocument.DocumentId, out var latestDocument) ||
+                    latestDocument is null ||
+                    latestDocument != scheduledDocument ||
+                    !_states.TryGetValue(scheduledDocument.DocumentId, out var state) ||
+                    !state.IsDirty)
+                {
+                    return true;
+                }
+
+                var domConverter = CompileAndStore(latestDocument);
+                if (domConverter.is_compiled)
+                    RecompileOpenDependents(latestDocument);
+                return true;
+            }, cancellation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            await ExecuteSerializedAsync(() =>
+            {
+                if (_states.TryGetValue(scheduledDocument.DocumentId, out var state) &&
+                    state.Document == scheduledDocument)
+                {
+                    _states[scheduledDocument.DocumentId] = state with
+                    {
+                        IsStale = true,
+                        IsDirty = false,
+                        LastConversionError = exception.ToString()
+                    };
+                }
+
+                return true;
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_pendingAnalysesSync)
+            {
+                if (_pendingAnalyses.TryGetValue(scheduledDocument.DocumentId, out var current) &&
+                    ReferenceEquals(current, cancellation))
+                {
+                    _pendingAnalyses.Remove(scheduledDocument.DocumentId);
+                }
+            }
+
+            cancellation.Dispose();
+        }
+    }
+
+    private void CancelPendingAnalysis(string documentId)
+    {
+        lock (_pendingAnalysesSync)
+        {
+            if (_pendingAnalyses.Remove(documentId, out var cancellation))
+                cancellation.Cancel();
+        }
     }
 
     private static void ValidateDocument(string documentId, string fileName, string text)
@@ -231,5 +477,12 @@ public sealed class PascalLanguageService : IPascalLanguageService
             throw new ArgumentException("Only PascalABC.NET .pas documents are supported.", nameof(fileName));
     }
 
-    private sealed record DocumentState(DocumentSnapshot Document, DomConverter DomConverter);
+    private sealed record DocumentState(
+        DocumentSnapshot Document,
+        DomConverter DomConverter,
+        IReadOnlySet<string> Dependencies,
+        long Generation,
+        bool IsStale,
+        bool IsDirty,
+        string? LastConversionError);
 }

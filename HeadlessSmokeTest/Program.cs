@@ -154,6 +154,315 @@ Check(
         signature => signature.Contains("Substring", StringComparison.OrdinalIgnoreCase)) == true,
     "LanguageServices signature help describes Substring");
 
+var dependencyDirectory = Path.Combine(Path.GetTempPath(), "PascalABCNet.Tooling.DependencyRegression");
+var dependencyFileName = Path.Combine(dependencyDirectory, "DependencyA.pas");
+var consumerFileName = Path.Combine(dependencyDirectory, "DependencyB.pas");
+var dependencyDocumentId = new Uri(dependencyFileName).AbsoluteUri;
+var consumerDocumentId = new Uri(consumerFileName).AbsoluteUri;
+
+const string dependencySourceV1 = """
+unit DependencyA;
+
+interface
+
+type
+  TDependency = class
+    procedure Foo;
+  end;
+
+implementation
+
+procedure TDependency.Foo;
+begin
+end;
+
+end.
+""";
+
+const string dependencySourceV2 = """
+unit DependencyA;
+
+interface
+
+type
+  TDependency = class
+    procedure Bar;
+  end;
+
+implementation
+
+procedure TDependency.Bar;
+begin
+end;
+
+end.
+""";
+
+const string dependencyBrokenSource = """
+unit DependencyA;
+
+interface
+
+type
+  TDependency = class
+    procedure
+  end;
+
+implementation
+
+procedure TDependency.Foo;
+begin
+  Self.Foo;
+end;
+
+end.
+""";
+
+const string dependencySourceV3 = """
+unit DependencyA;
+
+interface
+
+type
+  TDependency = class
+    procedure Baz;
+  end;
+
+implementation
+
+procedure TDependency.Baz;
+begin
+end;
+
+end.
+""";
+
+const string consumerSource = """
+program DependencyB;
+
+uses DependencyA;
+
+var value: TDependency;
+
+begin
+  value.Foo;
+end.
+""";
+
+Directory.CreateDirectory(dependencyDirectory);
+File.WriteAllText(dependencyFileName, dependencySourceV1);
+File.WriteAllText(consumerFileName, consumerSource);
+
+var dependencyV1 = await languageService.OpenOrUpdateDocumentAsync(
+    dependencyDocumentId,
+    dependencyFileName,
+    dependencySourceV1,
+    version: 1);
+Check(dependencyV1.IsCompiled, "Dependency A version 1 compiled");
+
+var consumerAnalysis = await languageService.OpenOrUpdateDocumentAsync(
+    consumerDocumentId,
+    consumerFileName,
+    consumerSource,
+    version: 1);
+Check(consumerAnalysis.IsCompiled, "Consumer B compiled against dependency A");
+
+var dependencyMemberOffset = consumerSource.IndexOf("value.", StringComparison.Ordinal) + "value.".Length;
+var completionBeforeDependencyChange = await languageService.GetCompletionAfterDotAsync(
+    consumerDocumentId,
+    dependencyMemberOffset);
+Check(
+    completionBeforeDependencyChange.Any(item => item.Label == "Foo"),
+    "Consumer completion initially contains Foo from dependency A");
+
+File.WriteAllText(dependencyFileName, dependencyBrokenSource);
+var brokenDependency = await languageService.OpenOrUpdateDocumentAsync(
+    dependencyDocumentId,
+    dependencyFileName,
+    dependencyBrokenSource,
+    version: 2);
+Check(!brokenDependency.IsCompiled, "Broken dependency update is reported as failed");
+Check(
+    languageService.Documents.TryGet(dependencyDocumentId, out var brokenDependencySnapshot) &&
+    brokenDependencySnapshot?.Version == 2 &&
+    brokenDependencySnapshot.Text == dependencyBrokenSource,
+    "Broken dependency snapshot remains the latest editor version");
+
+var completionAfterBrokenDependency = await languageService.GetCompletionAfterDotAsync(
+    consumerDocumentId,
+    dependencyMemberOffset);
+Check(
+    completionAfterBrokenDependency.Any(item => item.Label == "Foo"),
+    "Consumer keeps the last successful dependency model while A is broken");
+var brokenDependencyMemberOffset =
+    dependencyBrokenSource.IndexOf("Self.", StringComparison.Ordinal) + "Self.".Length;
+Check(
+    (await languageService.GetCompletionAfterDotAsync(
+        dependencyDocumentId,
+        brokenDependencyMemberOffset)).Any(item => item.Label == "Foo"),
+    "Broken A keeps its own last successful semantic model");
+Console.WriteLine("PASS last successful semantic model survives a broken dependency update");
+
+File.WriteAllText(dependencyFileName, dependencySourceV2);
+var dependencyV2 = await languageService.OpenOrUpdateDocumentAsync(
+    dependencyDocumentId,
+    dependencyFileName,
+    dependencySourceV2,
+    version: 3);
+Check(dependencyV2.IsCompiled, "Dependency A version 2 compiled");
+
+var completionAfterDependencyChange = await languageService.GetCompletionAfterDotAsync(
+    consumerDocumentId,
+    dependencyMemberOffset);
+var completionAfterDependencyChangeLabels = string.Join(
+    ", ",
+    completionAfterDependencyChange.Select(item => item.Label));
+Check(
+    completionAfterDependencyChange.Any(item => item.Label == "Bar"),
+    $"Consumer completion refreshes Bar after dependency A changes (symbols: {completionAfterDependencyChangeLabels})");
+Check(
+    completionAfterDependencyChange.All(item => item.Label != "Foo"),
+    "Consumer completion drops stale Foo after dependency A changes");
+Console.WriteLine("PASS dependency-aware semantic refresh");
+
+File.WriteAllText(dependencyFileName, dependencyBrokenSource);
+await languageService.QueueDocumentUpdateAsync(
+    dependencyDocumentId,
+    dependencyFileName,
+    dependencyBrokenSource,
+    version: 4);
+File.WriteAllText(dependencyFileName, dependencySourceV3);
+await languageService.QueueDocumentUpdateAsync(
+    dependencyDocumentId,
+    dependencyFileName,
+    dependencySourceV3,
+    version: 5);
+
+var completionAfterBurstUpdate = await languageService.GetCompletionAfterDotAsync(
+    consumerDocumentId,
+    dependencyMemberOffset);
+Check(
+    completionAfterBurstUpdate.Any(item => item.Label == "Baz"),
+    "Semantic request compiles the latest queued dependency version");
+Check(
+    completionAfterBurstUpdate.All(item => item.Label != "Foo" && item.Label != "Bar"),
+    "Superseded queued dependency versions are not published");
+Check(
+    languageService.Documents.TryGet(dependencyDocumentId, out var burstDependencySnapshot) &&
+    burstDependencySnapshot?.Version == 5,
+    "Document storage keeps the newest queued version");
+await languageService.QueueDocumentUpdateAsync(
+    dependencyDocumentId,
+    dependencyFileName,
+    dependencyBrokenSource,
+    version: 4);
+Check(
+    languageService.Documents.TryGet(dependencyDocumentId, out var snapshotAfterStaleUpdate) &&
+    snapshotAfterStaleUpdate?.Version == 5 &&
+    snapshotAfterStaleUpdate.Text == dependencySourceV3,
+    "A stale queued version cannot roll back the latest document snapshot");
+Console.WriteLine("PASS queued updates coalesce to the latest semantic version");
+
+var chainAFileName = Path.Combine(dependencyDirectory, "ChainA.pas");
+var chainBFileName = Path.Combine(dependencyDirectory, "ChainB.pas");
+var chainCFileName = Path.Combine(dependencyDirectory, "ChainC.pas");
+
+const string chainASourceV1 = """
+unit ChainA;
+interface
+type
+  TBase = class
+    procedure OldMember;
+  end;
+implementation
+procedure TBase.OldMember;
+begin
+end;
+end.
+""";
+
+const string chainASourceV2 = """
+unit ChainA;
+interface
+type
+  TBase = class
+    procedure NewMember;
+  end;
+implementation
+procedure TBase.NewMember;
+begin
+end;
+end.
+""";
+
+const string chainBSource = """
+unit ChainB;
+interface
+uses ChainA;
+type
+  TDerived = class(TBase)
+  end;
+implementation
+end.
+""";
+
+const string chainCSource = """
+program ChainC;
+uses ChainB;
+var value: TDerived;
+begin
+  value.OldMember;
+end.
+""";
+
+File.WriteAllText(chainAFileName, chainASourceV1);
+File.WriteAllText(chainBFileName, chainBSource);
+File.WriteAllText(chainCFileName, chainCSource);
+
+var chainADocumentId = new Uri(chainAFileName).AbsoluteUri;
+var chainBDocumentId = new Uri(chainBFileName).AbsoluteUri;
+var chainCDocumentId = new Uri(chainCFileName).AbsoluteUri;
+
+Check((await languageService.OpenOrUpdateDocumentAsync(
+    chainADocumentId,
+    chainAFileName,
+    chainASourceV1,
+    version: 1)).IsCompiled, "Transitive dependency A compiled");
+Check((await languageService.OpenOrUpdateDocumentAsync(
+    chainBDocumentId,
+    chainBFileName,
+    chainBSource,
+    version: 1)).IsCompiled, "Transitive dependency B compiled");
+Check((await languageService.OpenOrUpdateDocumentAsync(
+    chainCDocumentId,
+    chainCFileName,
+    chainCSource,
+    version: 1)).IsCompiled, "Transitive consumer C compiled");
+
+var chainMemberOffset = chainCSource.IndexOf("value.", StringComparison.Ordinal) + "value.".Length;
+Check(
+    (await languageService.GetCompletionAfterDotAsync(chainCDocumentId, chainMemberOffset))
+        .Any(item => item.Label == "OldMember"),
+    "Transitive consumer initially contains OldMember");
+
+File.WriteAllText(chainAFileName, chainASourceV2);
+Check((await languageService.OpenOrUpdateDocumentAsync(
+    chainADocumentId,
+    chainAFileName,
+    chainASourceV2,
+    version: 2)).IsCompiled, "Transitive dependency A version 2 compiled");
+
+var chainCompletionAfterChange = await languageService.GetCompletionAfterDotAsync(
+    chainCDocumentId,
+    chainMemberOffset);
+Check(
+    chainCompletionAfterChange.Any(item => item.Label == "NewMember"),
+    "Transitive consumer refreshes NewMember after dependency A changes");
+Check(
+    chainCompletionAfterChange.All(item => item.Label != "OldMember"),
+    "Transitive consumer drops stale OldMember after dependency A changes");
+Console.WriteLine("PASS transitive dependency-aware semantic refresh");
+
 var invalidAnalysis = await languageService.OpenOrUpdateDocumentAsync(
     "file:///Broken.pas",
     "Broken.pas",

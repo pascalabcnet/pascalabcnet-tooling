@@ -40,7 +40,7 @@ The headless test exercises the PascalABC.NET semantic APIs without an editor or
 dotnet run --project HeadlessSmokeTest/HeadlessSmokeTest.csproj
 ```
 
-The LSP test starts the server as a separate process and verifies initialize, document synchronization, completion, hover, signature help, shutdown, and exit over stdio:
+The LSP test starts the server as a separate process and verifies initialize, incremental document synchronization, dependency refresh, completion, hover, signature help, shutdown, and exit over stdio:
 
 ```sh
 dotnet run --project LanguageServerSmokeTest/LanguageServerSmokeTest.csproj
@@ -68,3 +68,5 @@ PascalABC.NET (Git submodule)
 ```
 
 The language-service layer has no dependency on VS Code, LSP DTOs, WinForms, `ICSharpCode.TextEditor`, or the legacy PascalABC.NET workbench. IntelliSense operations are serialized because the underlying PascalABC.NET semantic services are process-global and are not safe for parallel execution.
+
+Open documents use incremental LSP text synchronization. Semantic analysis is debounced, preserves the last successful model while the current text is invalid, and refreshes open units transitively when one of their dependencies changes.
