@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Planned
+
+- Diagnostics, definition, references, and additional LSP capabilities.
+- Packaging and integration with the PascalABC.NET VS Code extension.
+
+## [0.1.1] - 2026-08-11
+
 ### Added
 
 - Dependency-aware semantic refresh for directly and transitively dependent open units.
@@ -16,11 +23,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Replaced full LSP document synchronization with incremental range synchronization.
 - Semantic requests now ensure queued document versions are analyzed before returning results.
-
-### Planned
-
-- Diagnostics, definition, references, and additional LSP capabilities.
-- Packaging and integration with the PascalABC.NET VS Code extension.
 
 ## [0.1.0] - 2026-08-10
 
@@ -48,5 +50,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - SPython-specific tooling code.
 - Named-pipe transport.
 
-[Unreleased]: https://github.com/pascalabcnet/pascalabcnet-tooling/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/pascalabcnet/pascalabcnet-tooling/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/pascalabcnet/pascalabcnet-tooling/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pascalabcnet/pascalabcnet-tooling/releases/tag/v0.1.0
