@@ -165,6 +165,31 @@ Check(
     $"DateTime completion contains Now, Today and UtcNow; actual: {string.Join(", ", dateTimeLabels)}");
 Console.WriteLine("PASS DateTime completion over stdio");
 
+const string arrayBeforeDot = """
+begin
+  var a := Arr(1,2,3,4,5,6);
+  var s := a
+end.
+""";
+const string arrayAfterDot = """
+begin
+  var a := Arr(1,2,3,4,5,6);
+  var s := a.
+end.
+""";
+const string arrayUri = "file:///C:/ArrayAsSpanCompletion.pas";
+await WriteDidOpenAsync(input, arrayUri, arrayBeforeDot, version: 1, timeout.Token);
+await WriteDidChangeAsync(input, arrayUri, arrayAfterDot, version: 2, timeout.Token);
+var arrayCaretOffset = arrayAfterDot.IndexOf("a.", StringComparison.Ordinal) + "a.".Length;
+var arrayPosition = GetPosition(arrayAfterDot, arrayCaretOffset);
+await WriteRequestAsync(input, 23, "textDocument/completion", arrayUri, arrayPosition, timeout.Token);
+using var arrayCompletion = await ReadResponseAsync(output, 23, timeout.Token);
+var arrayLabels = GetCompletionLabels(arrayCompletion);
+Check(
+    arrayLabels.Any(label => label.StartsWith("AsSpan", StringComparison.Ordinal)),
+    $"Array completion contains AsSpan; actual: {string.Join(", ", arrayLabels)}");
+Console.WriteLine("PASS array AsSpan completion over stdio");
+
 const string firstVirtualSource = """
 program VirtualOne;
 type TFirstVirtual = class procedure FirstMember; end;
@@ -659,10 +684,10 @@ foreach (var uri in new[] { firstSyntheticUri.AbsoluteUri, secondSyntheticUri.Ab
 await WriteMessageAsync(input, new
 {
     jsonrpc = "2.0",
-    id = 22,
+    id = 24,
     method = "shutdown"
 }, timeout.Token);
-using var shutdown = await ReadResponseAsync(output, 22, timeout.Token);
+using var shutdown = await ReadResponseAsync(output, 24, timeout.Token);
 Check(shutdown.RootElement.TryGetProperty("result", out var shutdownResult) &&
       shutdownResult.ValueKind == JsonValueKind.Null,
     "shutdown returned null result");

@@ -186,6 +186,37 @@ Check(
     $"DateTime completion contains Now, Today and UtcNow; actual: {string.Join(", ", dateTimeCompletion.Select(item => item.Label))}");
 Console.WriteLine("PASS DateTime completion after interactive dot");
 
+const string arrayDocumentId = "file:///ArrayAsSpanCompletion.pas";
+const string arrayBeforeDot = """
+begin
+  var a := Arr(1,2,3,4,5,6);
+  var s := a
+end.
+""";
+const string arrayAfterDot = """
+begin
+  var a := Arr(1,2,3,4,5,6);
+  var s := a.
+end.
+""";
+var arrayInitialAnalysis = await languageService.OpenOrUpdateDocumentAsync(
+    arrayDocumentId,
+    "ArrayAsSpanCompletion.pas",
+    arrayBeforeDot,
+    version: 1);
+Check(arrayInitialAnalysis.IsCompiled, "Array document is analyzed before typing dot");
+await languageService.QueueDocumentUpdateAsync(
+    arrayDocumentId,
+    "ArrayAsSpanCompletion.pas",
+    arrayAfterDot,
+    version: 2);
+var arrayCaretOffset = arrayAfterDot.IndexOf("a.", StringComparison.Ordinal) + "a.".Length;
+var arrayCompletion = await languageService.GetCompletionAfterDotAsync(arrayDocumentId, arrayCaretOffset);
+Check(
+    arrayCompletion.Any(item => item.Label.StartsWith("AsSpan", StringComparison.Ordinal)),
+    $"Array completion contains AsSpan; actual: {string.Join(", ", arrayCompletion.Select(item => item.Label))}");
+Console.WriteLine("PASS array AsSpan completion after interactive dot");
+
 var dependencyDirectory = Path.Combine(Path.GetTempPath(), "PascalABCNet.Tooling.DependencyRegression");
 var dependencyFileName = Path.Combine(dependencyDirectory, "DependencyA.pas");
 var consumerFileName = Path.Combine(dependencyDirectory, "DependencyB.pas");
