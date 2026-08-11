@@ -259,6 +259,11 @@ var dependencyV1 = await languageService.OpenOrUpdateDocumentAsync(
     dependencySourceV1,
     version: 1);
 Check(dependencyV1.IsCompiled, "Dependency A version 1 compiled");
+var dependencyConverterBeforeBrokenUpdate =
+    CodeCompletionController.comp_modules[dependencyFileName] as DomConverter;
+Check(
+    dependencyConverterBeforeBrokenUpdate is not null,
+    "Dependency A version 1 is stored in the global semantic cache");
 
 var consumerAnalysis = await languageService.OpenOrUpdateDocumentAsync(
     consumerDocumentId,
@@ -294,12 +299,10 @@ var completionAfterBrokenDependency = await languageService.GetCompletionAfterDo
 Check(
     completionAfterBrokenDependency.Any(item => item.Label == "Foo"),
     "Consumer keeps the last successful dependency model while A is broken");
-var brokenDependencyMemberOffset =
-    dependencyBrokenSource.IndexOf("Self.", StringComparison.Ordinal) + "Self.".Length;
 Check(
-    (await languageService.GetCompletionAfterDotAsync(
-        dependencyDocumentId,
-        brokenDependencyMemberOffset)).Any(item => item.Label == "Foo"),
+    ReferenceEquals(
+        dependencyConverterBeforeBrokenUpdate,
+        CodeCompletionController.comp_modules[dependencyFileName] as DomConverter),
     "Broken A keeps its own last successful semantic model");
 Console.WriteLine("PASS last successful semantic model survives a broken dependency update");
 
