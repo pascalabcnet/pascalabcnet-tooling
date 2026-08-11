@@ -142,6 +142,29 @@ Check(signature.RootElement.GetProperty("result").GetProperty("signatures")
     "signature help describes Substring");
 Console.WriteLine("PASS signature help over stdio");
 
+const string dateTimeBeforeDot = """
+begin
+  DateTime
+end.
+""";
+const string dateTimeAfterDot = """
+begin
+  DateTime.
+end.
+""";
+const string dateTimeUri = "file:///C:/DateTimeCompletion.pas";
+await WriteDidOpenAsync(input, dateTimeUri, dateTimeBeforeDot, version: 1, timeout.Token);
+await WriteDidChangeAsync(input, dateTimeUri, dateTimeAfterDot, version: 2, timeout.Token);
+var dateTimeCaretOffset = dateTimeAfterDot.IndexOf("DateTime.", StringComparison.Ordinal) + "DateTime.".Length;
+var dateTimePosition = GetPosition(dateTimeAfterDot, dateTimeCaretOffset);
+await WriteRequestAsync(input, 21, "textDocument/completion", dateTimeUri, dateTimePosition, timeout.Token);
+using var dateTimeCompletion = await ReadResponseAsync(output, 21, timeout.Token);
+var dateTimeLabels = GetCompletionLabels(dateTimeCompletion);
+Check(
+    new[] { "Now", "Today", "UtcNow" }.All(dateTimeLabels.Contains),
+    $"DateTime completion contains Now, Today and UtcNow; actual: {string.Join(", ", dateTimeLabels)}");
+Console.WriteLine("PASS DateTime completion over stdio");
+
 const string firstVirtualSource = """
 program VirtualOne;
 type TFirstVirtual = class procedure FirstMember; end;
@@ -636,10 +659,10 @@ foreach (var uri in new[] { firstSyntheticUri.AbsoluteUri, secondSyntheticUri.Ab
 await WriteMessageAsync(input, new
 {
     jsonrpc = "2.0",
-    id = 20,
+    id = 22,
     method = "shutdown"
 }, timeout.Token);
-using var shutdown = await ReadResponseAsync(output, 20, timeout.Token);
+using var shutdown = await ReadResponseAsync(output, 22, timeout.Token);
 Check(shutdown.RootElement.TryGetProperty("result", out var shutdownResult) &&
       shutdownResult.ValueKind == JsonValueKind.Null,
     "shutdown returned null result");

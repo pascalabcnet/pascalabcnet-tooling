@@ -154,6 +154,38 @@ Check(
         signature => signature.Contains("Substring", StringComparison.OrdinalIgnoreCase)) == true,
     "LanguageServices signature help describes Substring");
 
+const string dateTimeDocumentId = "file:///DateTimeCompletion.pas";
+const string dateTimeBeforeDot = """
+begin
+  DateTime
+end.
+""";
+const string dateTimeAfterDot = """
+begin
+  DateTime.
+end.
+""";
+var dateTimeInitialAnalysis = await languageService.OpenOrUpdateDocumentAsync(
+    dateTimeDocumentId,
+    "DateTimeCompletion.pas",
+    dateTimeBeforeDot,
+    version: 1);
+Check(dateTimeInitialAnalysis.IsCompiled, "DateTime document is analyzed before typing dot");
+await languageService.QueueDocumentUpdateAsync(
+    dateTimeDocumentId,
+    "DateTimeCompletion.pas",
+    dateTimeAfterDot,
+    version: 2);
+var dateTimeCaretOffset = dateTimeAfterDot.IndexOf("DateTime.", StringComparison.Ordinal) + "DateTime.".Length;
+var dateTimeCompletion = await languageService.GetCompletionAfterDotAsync(
+    dateTimeDocumentId,
+    dateTimeCaretOffset);
+Check(
+    new[] { "Now", "Today", "UtcNow" }.All(expected =>
+        dateTimeCompletion.Any(item => item.Label == expected)),
+    $"DateTime completion contains Now, Today and UtcNow; actual: {string.Join(", ", dateTimeCompletion.Select(item => item.Label))}");
+Console.WriteLine("PASS DateTime completion after interactive dot");
+
 var dependencyDirectory = Path.Combine(Path.GetTempPath(), "PascalABCNet.Tooling.DependencyRegression");
 var dependencyFileName = Path.Combine(dependencyDirectory, "DependencyA.pas");
 var consumerFileName = Path.Combine(dependencyDirectory, "DependencyB.pas");

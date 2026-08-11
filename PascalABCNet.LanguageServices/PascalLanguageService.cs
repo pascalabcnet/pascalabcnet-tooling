@@ -6,6 +6,7 @@ namespace PascalABCNet.LanguageServices;
 
 public sealed class PascalLanguageService : IPascalLanguageService
 {
+    private const string LibrarySourceDirectoryKey = "%LIBSOURCEDIRECTORY%";
     private static readonly TimeSpan AnalysisDebounce = TimeSpan.FromMilliseconds(200);
     private static readonly SemaphoreSlim SemanticGate = new(1, 1);
 
@@ -17,15 +18,32 @@ public sealed class PascalLanguageService : IPascalLanguageService
     private readonly object _pendingAnalysesSync = new();
 
     public PascalLanguageService(string documentationLanguageIso = "en")
+        : this(documentationLanguageIso, FindStandardLibraryDirectory())
+    {
+    }
+
+    public PascalLanguageService(
+        string documentationLanguageIso,
+        string standardLibraryDirectory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(documentationLanguageIso);
+        ArgumentException.ThrowIfNullOrWhiteSpace(standardLibraryDirectory);
         _documentationLanguageIso = documentationLanguageIso;
+
+        var fullStandardLibraryDirectory = Path.GetFullPath(standardLibraryDirectory);
+        if (!File.Exists(Path.Combine(fullStandardLibraryDirectory, "PABCSystem.pas")))
+        {
+            throw new DirectoryNotFoundException(
+                $"PascalABC.NET standard library was not found in '{fullStandardLibraryDirectory}'.");
+        }
 
         SemanticGate.Wait();
         try
         {
             _language = PascalLanguageRegistration.RegisterPascalLanguage();
             CodeCompletionBootstrap.Initialize(_documentationLanguageIso);
+            CodeCompletionController.StandartDirectories[LibrarySourceDirectoryKey] =
+                fullStandardLibraryDirectory;
         }
         finally
         {
@@ -419,6 +437,27 @@ public sealed class PascalLanguageService : IPascalLanguageService
     }
 
     private static string NormalizeFileName(string fileName) => Path.GetFullPath(fileName);
+
+    private static string FindStandardLibraryDirectory()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory);
+             directory is not null;
+             directory = directory.Parent)
+        {
+            foreach (var candidate in new[]
+                     {
+                         Path.Combine(directory.FullName, "Lib"),
+                         Path.Combine(directory.FullName, "pascalabcnet", "bin", "Lib")
+                     })
+            {
+                if (File.Exists(Path.Combine(candidate, "PABCSystem.pas")))
+                    return candidate;
+            }
+        }
+
+        throw new DirectoryNotFoundException(
+            "Could not locate the PascalABC.NET standard library containing PABCSystem.pas.");
+    }
 
     private void EnsureDirtyDocumentsFresh()
     {
