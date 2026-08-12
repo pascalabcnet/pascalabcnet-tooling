@@ -217,6 +217,31 @@ Check(
     $"Array completion contains AsSpan; actual: {string.Join(", ", arrayCompletion.Select(item => item.Label))}");
 Console.WriteLine("PASS array AsSpan completion after interactive dot");
 
+const string arraySignatureDocumentId = "file:///ArrayAsSpanSignature.pas";
+const string arraySignatureSource = """
+begin
+  var a := Arr(1,2,3,4,5,6);
+  var s := a.AsSpan()
+end.
+""";
+var arraySignatureAnalysis = await languageService.OpenOrUpdateDocumentAsync(
+    arraySignatureDocumentId,
+    "ArrayAsSpanSignature.pas",
+    arraySignatureSource,
+    version: 1);
+Check(arraySignatureAnalysis.IsCompiled, "Array AsSpan signature document is analyzed");
+var arraySignatureOffset =
+    arraySignatureSource.IndexOf("AsSpan(", StringComparison.Ordinal) + "AsSpan(".Length;
+var arraySignatureHelp = await languageService.GetSignatureHelpAsync(
+    arraySignatureDocumentId,
+    arraySignatureOffset,
+    '(');
+Check(
+    arraySignatureHelp?.Signatures.Any(signature =>
+        signature.Contains("AsSpan", StringComparison.OrdinalIgnoreCase)) == true,
+    "Array AsSpan signature help contains AsSpan");
+Console.WriteLine("PASS array AsSpan signature help");
+
 var dependencyDirectory = Path.Combine(Path.GetTempPath(), "PascalABCNet.Tooling.DependencyRegression");
 var dependencyFileName = Path.Combine(dependencyDirectory, "DependencyA.pas");
 var consumerFileName = Path.Combine(dependencyDirectory, "DependencyB.pas");

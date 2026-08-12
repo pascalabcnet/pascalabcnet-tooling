@@ -190,6 +190,26 @@ Check(
     $"Array completion contains AsSpan; actual: {string.Join(", ", arrayLabels)}");
 Console.WriteLine("PASS array AsSpan completion over stdio");
 
+const string arraySignatureSource = """
+begin
+  var a := Arr(1,2,3,4,5,6);
+  var s := a.AsSpan()
+end.
+""";
+const string arraySignatureUri = "file:///C:/ArrayAsSpanSignature.pas";
+await WriteDidOpenAsync(input, arraySignatureUri, arraySignatureSource, version: 1, timeout.Token);
+var arraySignatureOffset =
+    arraySignatureSource.IndexOf("AsSpan(", StringComparison.Ordinal) + "AsSpan(".Length;
+var arraySignaturePosition = GetPosition(arraySignatureSource, arraySignatureOffset);
+await WriteRequestAsync(input, 25, "textDocument/signatureHelp", arraySignatureUri, arraySignaturePosition, timeout.Token);
+using var arraySignature = await ReadResponseAsync(output, 25, timeout.Token);
+Check(
+    arraySignature.RootElement.GetProperty("result").GetProperty("signatures")
+        .EnumerateArray().Any(item => item.GetProperty("label").GetString()
+            ?.Contains("AsSpan", StringComparison.OrdinalIgnoreCase) == true),
+    "Array AsSpan signature help contains AsSpan");
+Console.WriteLine("PASS array AsSpan signature help over stdio");
+
 const string firstVirtualSource = """
 program VirtualOne;
 type TFirstVirtual = class procedure FirstMember; end;
@@ -684,10 +704,10 @@ foreach (var uri in new[] { firstSyntheticUri.AbsoluteUri, secondSyntheticUri.Ab
 await WriteMessageAsync(input, new
 {
     jsonrpc = "2.0",
-    id = 24,
+    id = 26,
     method = "shutdown"
 }, timeout.Token);
-using var shutdown = await ReadResponseAsync(output, 24, timeout.Token);
+using var shutdown = await ReadResponseAsync(output, 26, timeout.Token);
 Check(shutdown.RootElement.TryGetProperty("result", out var shutdownResult) &&
       shutdownResult.ValueKind == JsonValueKind.Null,
     "shutdown returned null result");
