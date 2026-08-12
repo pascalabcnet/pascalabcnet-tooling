@@ -242,6 +242,76 @@ Check(
     "Array AsSpan signature help contains AsSpan");
 Console.WriteLine("PASS array AsSpan signature help");
 
+const string queueDocumentId = "file:///PriorityQueueCompletion.pas";
+const string queueBeforeDot = """
+uses System.Collections.Generic;
+
+begin
+  var q := new PriorityQueue<string,integer>;
+  q
+end.
+""";
+const string queueAfterDot = """
+uses System.Collections.Generic;
+
+begin
+  var q := new PriorityQueue<string,integer>;
+  q.
+end.
+""";
+var queueInitialAnalysis = await languageService.OpenOrUpdateDocumentAsync(
+    queueDocumentId,
+    "PriorityQueueCompletion.pas",
+    queueBeforeDot,
+    version: 1);
+Check(queueInitialAnalysis.IsCompiled, "PriorityQueue document is analyzed before typing dot");
+await languageService.QueueDocumentUpdateAsync(
+    queueDocumentId,
+    "PriorityQueueCompletion.pas",
+    queueAfterDot,
+    version: 2);
+var queueCaretOffset = queueAfterDot.IndexOf("q.", StringComparison.Ordinal) + "q.".Length;
+var queueCompletion = await languageService.GetCompletionAfterDotAsync(queueDocumentId, queueCaretOffset);
+Check(
+    queueCompletion.Any(item => item.Label == "Enqueue"),
+    $"PriorityQueue completion contains Enqueue; actual: {string.Join(", ", queueCompletion.Select(item => item.Label))}");
+Check(
+    queueCompletion.All(item => item.Label != "ReadInteger"),
+    "PriorityQueue completion does not contain string.ReadInteger");
+Console.WriteLine("PASS PriorityQueue completion uses the correct generic type");
+
+const string queueCallDocumentId = "file:///PriorityQueueCall.pas";
+const string queueCallSource = """
+uses System.Collections.Generic;
+
+begin
+  var q := new PriorityQueue<string,integer>;
+  q.Enqueue('low',10)
+end.
+""";
+var queueCallAnalysis = await languageService.OpenOrUpdateDocumentAsync(
+    queueCallDocumentId,
+    "PriorityQueueCall.pas",
+    queueCallSource,
+    version: 1);
+Check(queueCallAnalysis.IsCompiled, "PriorityQueue call document is analyzed");
+var queueHoverOffset = queueCallSource.IndexOf("Enqueue", StringComparison.Ordinal) + 1;
+var queueHover = await languageService.GetHoverAsync(queueCallDocumentId, queueHoverOffset);
+Check(
+    queueHover?.Contents.Contains("Enqueue", StringComparison.OrdinalIgnoreCase) == true,
+    "PriorityQueue hover describes Enqueue");
+var queueSignatureOffset =
+    queueCallSource.IndexOf("Enqueue(", StringComparison.Ordinal) + "Enqueue(".Length;
+var queueSignatureHelp = await languageService.GetSignatureHelpAsync(
+    queueCallDocumentId,
+    queueSignatureOffset,
+    '(');
+Check(
+    queueSignatureHelp?.Signatures.Any(signature =>
+        signature.Contains("Enqueue", StringComparison.OrdinalIgnoreCase)) == true,
+    "PriorityQueue signature help contains Enqueue");
+Console.WriteLine("PASS PriorityQueue hover and signature help");
+
 var dependencyDirectory = Path.Combine(Path.GetTempPath(), "PascalABCNet.Tooling.DependencyRegression");
 var dependencyFileName = Path.Combine(dependencyDirectory, "DependencyA.pas");
 var consumerFileName = Path.Combine(dependencyDirectory, "DependencyB.pas");
