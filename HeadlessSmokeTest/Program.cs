@@ -151,8 +151,35 @@ Check(
     "LanguageServices hover describes Substring");
 Check(
     signatureTask.Result?.Signatures.Any(
-        signature => signature.Contains("Substring", StringComparison.OrdinalIgnoreCase)) == true,
+        signature => signature.Label.Contains("Substring", StringComparison.OrdinalIgnoreCase)) == true,
     "LanguageServices signature help describes Substring");
+Check(
+    signatureTask.Result?.Signatures.Any(signature => signature.Parameters.Count > 0) == true,
+    "LanguageServices signature help contains parameters");
+
+const string printDocumentId = "file:///PrintSignature.pas";
+const string printSource = """
+begin
+  Print(1)
+end.
+""";
+var russianLanguageService = new PascalLanguageService("ru");
+var printAnalysis = await russianLanguageService.OpenOrUpdateDocumentAsync(
+    printDocumentId,
+    "PrintSignature.pas",
+    printSource,
+    version: 1);
+Check(printAnalysis.IsCompiled, "Print signature document is analyzed");
+var printSignatureOffset = printSource.IndexOf("Print(", StringComparison.Ordinal) + "Print(".Length;
+var printSignatureHelp = await russianLanguageService.GetSignatureHelpAsync(
+    printDocumentId,
+    printSignatureOffset,
+    '(');
+Check(
+    printSignatureHelp?.Signatures.Any(signature =>
+        signature.Label.Contains("Print", StringComparison.OrdinalIgnoreCase) &&
+        signature.Parameters.Count > 0) == true,
+    "Print signature help contains parameters");
 
 const string dateTimeDocumentId = "file:///DateTimeCompletion.pas";
 const string dateTimeBeforeDot = """
@@ -238,7 +265,7 @@ var arraySignatureHelp = await languageService.GetSignatureHelpAsync(
     '(');
 Check(
     arraySignatureHelp?.Signatures.Any(signature =>
-        signature.Contains("AsSpan", StringComparison.OrdinalIgnoreCase)) == true,
+        signature.Label.Contains("AsSpan", StringComparison.OrdinalIgnoreCase)) == true,
     "Array AsSpan signature help contains AsSpan");
 Console.WriteLine("PASS array AsSpan signature help");
 
@@ -308,8 +335,11 @@ var queueSignatureHelp = await languageService.GetSignatureHelpAsync(
     '(');
 Check(
     queueSignatureHelp?.Signatures.Any(signature =>
-        signature.Contains("Enqueue", StringComparison.OrdinalIgnoreCase)) == true,
+        signature.Label.Contains("Enqueue", StringComparison.OrdinalIgnoreCase)) == true,
     "PriorityQueue signature help contains Enqueue");
+Check(
+    queueSignatureHelp?.Signatures.Any(signature => signature.Parameters.Count >= 2) == true,
+    "PriorityQueue signature help contains both parameters");
 Console.WriteLine("PASS PriorityQueue hover and signature help");
 
 var dependencyDirectory = Path.Combine(Path.GetTempPath(), "PascalABCNet.Tooling.DependencyRegression");

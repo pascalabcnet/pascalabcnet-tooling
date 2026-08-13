@@ -143,6 +143,7 @@ internal sealed class PascalLanguageServerTarget
                 {
                     Label = item.Label,
                     Detail = item.Detail,
+                    Documentation = item.Documentation,
                     Kind = MapCompletionKind(item.Kind),
                     InsertText = item.Label.EndsWith("<>", StringComparison.Ordinal)
                         ? item.Label[..^2]
@@ -256,17 +257,15 @@ internal sealed class PascalLanguageServerTarget
         _ => CompletionItemKind.Text
     };
 
-    private static SignatureInformation CreateSignatureInformation(string description)
+    private static SignatureInformation CreateSignatureInformation(SignatureInfo signature)
     {
-        var separator = description.IndexOf('\n');
-        var label = separator < 0 ? description : description[..separator];
-        var documentation = separator < 0 ? null : description[(separator + 1)..];
-
         return new SignatureInformation
         {
-            Label = label,
-            Documentation = string.IsNullOrWhiteSpace(documentation) ? null : documentation,
-            Parameters = Array.Empty<ParameterInformation>()
+            Label = signature.Label,
+            Documentation = signature.Documentation,
+            Parameters = signature.Parameters
+                .Select(parameter => new ParameterInformation { Label = parameter })
+                .ToArray()
         };
     }
 }

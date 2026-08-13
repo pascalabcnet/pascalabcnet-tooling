@@ -197,10 +197,15 @@ public sealed class PascalLanguageService : IPascalLanguageService
 
             return result.Symbols
                 .Where(symbol => symbol is not null && !symbol.not_include)
-                .Select(symbol => new CompletionItem(
-                    string.IsNullOrEmpty(symbol.aliasName) ? symbol.name : symbol.aliasName,
-                    symbol.description,
-                    symbol.kind.ToString()))
+                .Select(symbol =>
+                {
+                    var (detail, documentation) = SymbolDescriptionParser.Split(symbol.description ?? string.Empty);
+                    return new CompletionItem(
+                        string.IsNullOrEmpty(symbol.aliasName) ? symbol.name : symbol.aliasName,
+                        detail,
+                        documentation,
+                        symbol.kind.ToString());
+                })
                 .DistinctBy(item => (item.Label.ToUpperInvariant(), item.Kind))
                 .ToArray();
         }, cancellationToken);
@@ -263,7 +268,7 @@ public sealed class PascalLanguageService : IPascalLanguageService
                 return null;
 
             return new SignatureHelpInfo(
-                result.Signatures,
+                result.Signatures.Select(SymbolDescriptionParser.ParseSignature).ToArray(),
                 result.DefaultIndex,
                 result.CurrentParameter,
                 result.ParameterCount);

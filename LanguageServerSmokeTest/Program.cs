@@ -58,7 +58,7 @@ using var process = new Process
 process.StartInfo.ArgumentList.Add(serverAssembly);
 process.StartInfo.ArgumentList.Add("--stdio");
 process.StartInfo.ArgumentList.Add("--documentation-language");
-process.StartInfo.ArgumentList.Add("en");
+process.StartInfo.ArgumentList.Add("ru");
 Check(process.Start(), "Language server process started");
 
 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
@@ -136,11 +136,94 @@ var signatureOffset = memberStart + memberAccess.Length + 1;
 var signaturePosition = GetPosition(source, signatureOffset);
 await WriteRequestAsync(input, 4, "textDocument/signatureHelp", documentUri, signaturePosition, timeout.Token);
 using var signature = await ReadResponseAsync(output, 4, timeout.Token);
-Check(signature.RootElement.GetProperty("result").GetProperty("signatures")
-    .EnumerateArray().Any(item => item.GetProperty("label").GetString()
-        ?.Contains("Substring", StringComparison.OrdinalIgnoreCase) == true),
+var substringSignatures = signature.RootElement.GetProperty("result").GetProperty("signatures");
+Check(substringSignatures.EnumerateArray().Any(item => item.GetProperty("label").GetString()
+    ?.Contains("Substring", StringComparison.OrdinalIgnoreCase) == true),
     "signature help describes Substring");
+Check(substringSignatures.EnumerateArray().Any(item =>
+        item.GetProperty("parameters").GetArrayLength() > 0),
+    "signature help contains LSP parameters");
 Console.WriteLine("PASS signature help over stdio");
+
+const string printSource = """
+begin
+  Print(1)
+end.
+""";
+const string printUri = "file:///C:/PrintSignature.pas";
+await WriteDidOpenAsync(input, printUri, printSource, version: 1, timeout.Token);
+var printSignatureOffset = printSource.IndexOf("Print(", StringComparison.Ordinal) + "Print(".Length;
+await WriteRequestAsync(
+    input,
+    26,
+    "textDocument/signatureHelp",
+    printUri,
+    GetPosition(printSource, printSignatureOffset),
+    timeout.Token);
+using var printSignature = await ReadResponseAsync(output, 26, timeout.Token);
+var printSignatures = printSignature.RootElement.GetProperty("result").GetProperty("signatures");
+Check(printSignatures.EnumerateArray().Any(item =>
+        item.GetProperty("parameters").GetArrayLength() > 0),
+    "Print signature contains LSP parameters");
+Check(printSignatures.EnumerateArray().Any(item =>
+        item.TryGetProperty("documentation", out var documentation) &&
+        documentation.ValueKind == JsonValueKind.String &&
+        !string.IsNullOrWhiteSpace(documentation.GetString())),
+    "Print signature contains Pascal documentation over LSP");
+Console.WriteLine("PASS Print parameters and documentation over stdio");
+
+const string documentedBeforeDot = """
+type TDocumented = class
+  /// Возвращает переданное значение
+  function Value(x: integer): integer;
+end;
+
+function TDocumented.Value(x: integer): integer;
+begin
+  Result := x;
+end;
+
+begin
+  var item := new TDocumented;
+  item
+end.
+""";
+const string documentedAfterDot = """
+type TDocumented = class
+  /// Возвращает переданное значение
+  function Value(x: integer): integer;
+end;
+
+function TDocumented.Value(x: integer): integer;
+begin
+  Result := x;
+end;
+
+begin
+  var item := new TDocumented;
+  item.
+end.
+""";
+const string documentedUri = "file:///C:/DocumentedCompletion.pas";
+await WriteDidOpenAsync(input, documentedUri, documentedBeforeDot, version: 1, timeout.Token);
+await WriteDidChangeAsync(input, documentedUri, documentedAfterDot, version: 2, timeout.Token);
+var documentedOffset = documentedAfterDot.IndexOf("item.", StringComparison.Ordinal) + "item.".Length;
+await WriteRequestAsync(
+    input,
+    27,
+    "textDocument/completion",
+    documentedUri,
+    GetPosition(documentedAfterDot, documentedOffset),
+    timeout.Token);
+using var documentedCompletion = await ReadResponseAsync(output, 27, timeout.Token);
+Check(documentedCompletion.RootElement.GetProperty("result").GetProperty("items")
+        .EnumerateArray().Any(item =>
+            item.GetProperty("label").GetString() == "Value" &&
+            item.TryGetProperty("documentation", out var documentation) &&
+            documentation.ValueKind == JsonValueKind.String &&
+            documentation.GetString()?.Contains("Возвращает", StringComparison.Ordinal) == true),
+    "Pascal completion contains source documentation over LSP");
+Console.WriteLine("PASS Pascal completion documentation over stdio");
 
 const string dateTimeBeforeDot = """
 begin
