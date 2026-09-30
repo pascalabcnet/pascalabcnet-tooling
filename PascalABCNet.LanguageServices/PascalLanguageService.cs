@@ -206,7 +206,16 @@ public sealed class PascalLanguageService : IPascalLanguageService
                 expressionInfo,
                 items);
 
-            return CreateCompletionItems(items, symbols);
+            var completionItems = CreateCompletionItems(items, symbols);
+            if (string.IsNullOrEmpty(expressionInfo.Pattern))
+                return completionItems;
+
+            var comparison = _language.CaseSensitive
+                ? StringComparison.Ordinal
+                : StringComparison.OrdinalIgnoreCase;
+            return completionItems
+                .Where(item => item.Label.StartsWith(expressionInfo.Pattern, comparison))
+                .ToArray();
         }, cancellationToken);
     }
 

@@ -149,8 +149,11 @@ await WriteRequestAsync(
     GetPosition(source, printStart + "Pri".Length),
     timeout.Token);
 using var prefixCompletion = await ReadResponseAsync(output, 31, timeout.Token);
-Check(GetCompletionLabels(prefixCompletion).Contains("Print"),
+var prefixLabels = GetCompletionLabels(prefixCompletion);
+Check(prefixLabels.Contains("Print"),
     "prefix completion contains Print");
+Check(prefixLabels.All(label => label.StartsWith("Pri", StringComparison.OrdinalIgnoreCase)),
+    "prefix completion excludes fuzzy non-prefix matches");
 
 var namespaceStart = source.IndexOf("System.Collections", StringComparison.Ordinal);
 await WriteRequestAsync(
