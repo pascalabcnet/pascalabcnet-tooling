@@ -27,6 +27,11 @@ public interface IPascalLanguageService
         int caretOffset,
         CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<CompletionItem>> GetCompletionAsync(
+        string documentId,
+        int caretOffset,
+        CancellationToken cancellationToken = default);
+
     Task<HoverInfo?> GetHoverAsync(
         string documentId,
         int offset,

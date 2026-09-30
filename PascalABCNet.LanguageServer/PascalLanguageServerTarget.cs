@@ -128,10 +128,14 @@ internal sealed class PascalLanguageServerTarget
         CancellationToken cancellationToken) =>
         _dispatcher.RunAsync(async () =>
         {
-            if (!TryGetTriggerOffset(request.TextDocument.Uri, request.Position, '.', out var caretOffset))
+            if (!DocumentConversions.TryGetOffset(
+                    _languageService,
+                    request.TextDocument.Uri,
+                    request.Position,
+                    out var caretOffset))
                 return EmptyCompletionList();
 
-            var items = await _languageService.GetCompletionAfterDotAsync(
+            var items = await _languageService.GetCompletionAsync(
                 DocumentConversions.GetDocumentId(request.TextDocument.Uri),
                 caretOffset,
                 cancellationToken).ConfigureAwait(false);

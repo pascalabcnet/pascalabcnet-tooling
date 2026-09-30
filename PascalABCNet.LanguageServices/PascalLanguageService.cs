@@ -1,6 +1,7 @@
 using CodeCompletion;
 using Languages.Facade;
 using Languages.Pascal;
+using PascalABCCompiler.Parsers;
 
 namespace PascalABCNet.LanguageServices;
 
@@ -145,6 +146,14 @@ public sealed class PascalLanguageService : IPascalLanguageService
         int caretOffset,
         CancellationToken cancellationToken = default)
     {
+        return GetCompletionAsync(documentId, caretOffset, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<CompletionItem>> GetCompletionAsync(
+        string documentId,
+        int caretOffset,
+        CancellationToken cancellationToken = default)
+    {
         return ExecuteSerializedAsync<IReadOnlyList<CompletionItem>>(() =>
         {
             var state = GetCompiledState(documentId);
@@ -152,12 +161,34 @@ public sealed class PascalLanguageService : IPascalLanguageService
                 return Array.Empty<CompletionItem>();
 
             var text = state.Document.Text;
-            if (caretOffset <= 0 || caretOffset > text.Length || text[caretOffset - 1] != '.')
-                throw new ArgumentException("The caret must be immediately after '.'.", nameof(caretOffset));
+            if (caretOffset < 0 || caretOffset > text.Length)
+                throw new ArgumentOutOfRangeException(nameof(caretOffset));
 
             var position = TextCoordinates.GetPosition(text, caretOffset);
             var textBeforeCaret = text[..caretOffset];
-            var context = new CompletionTriggerContext { DotPressed = true };
+            var items = new List<CompletionItem>();
+            if (caretOffset == 0)
+            {
+                items.AddRange(CodeCompletionNameHelper.Helper.GetKeywords().Select(keywordText =>
+                    new CompletionItem(keywordText, null, null, "Keyword")));
+                var rootSymbols = CompletionSymbolService.GetSymbolsByFirstCharacter(
+                    state.DomConverter,
+                    position.Line,
+                    position.Character,
+                    typeExpected: false,
+                    namespaceExpected: false,
+                    pattern: string.Empty,
+                    smartIntellisense: true,
+                    namespaceVisibleRange: 0);
+                return CreateCompletionItems(items, rootSymbols);
+            }
+
+            var afterDot = caretOffset > 0 && text[caretOffset - 1] == '.';
+            var context = new CompletionTriggerContext
+            {
+                DotPressed = afterDot,
+                CtrlSpace = !afterDot
+            };
             var expressionInfo = CompletionExpressionService.AnalyzeAtCaret(
                 caretOffset,
                 textBeforeCaret,
@@ -166,14 +197,54 @@ public sealed class PascalLanguageService : IPascalLanguageService
                 _language.LanguageIntellisenseSupport,
                 context,
                 PascalABCCompiler.Parsers.KeywordKind.None);
+            var symbols = GetCompletionSymbols(
+                state,
+                position,
+                textBeforeCaret,
+                caretOffset,
+                context,
+                expressionInfo,
+                items);
+
+            return CreateCompletionItems(items, symbols);
+        }, cancellationToken);
+    }
+
+    private IReadOnlyList<CompletionItem> CreateCompletionItems(
+        List<CompletionItem> items,
+        SymInfo[]? symbols)
+    {
+        if (symbols is not null)
+        {
+            _language.LanguageIntellisenseSupport.RenameOrExcludeSpecialNames(symbols);
+            items.AddRange(symbols
+                .Where(symbol => symbol is not null && !symbol.not_include)
+                .Select(CreateCompletionItem));
+        }
+
+        return items
+            .DistinctBy(item => (item.Label.ToUpperInvariant(), item.Kind))
+            .ToArray();
+    }
+
+    private SymInfo[]? GetCompletionSymbols(
+        DocumentState state,
+        TextPosition position,
+        string textBeforeCaret,
+        int caretOffset,
+        CompletionTriggerContext context,
+        CompletionExpressionInfo expressionInfo,
+        List<CompletionItem> items)
+    {
+        if (context.DotPressed || expressionInfo.InsidePatternWithDots)
+        {
             var parseResult = CompletionExpressionService.Parse(
                 _language.Parser,
                 state.Document.FileName,
                 expressionInfo.ExpressionText,
                 context);
-
             if (parseResult.ShouldAbortCompletion || parseResult.Expression is null)
-                return Array.Empty<CompletionItem>();
+                return null;
 
             var result = CompletionSymbolService.GetSymbols(
                 state.DomConverter,
@@ -189,26 +260,67 @@ public sealed class PascalLanguageService : IPascalLanguageService
                 expressionInfo.Keyword,
                 smartIntellisense: true,
                 namespaceVisibleRange: 0);
+            return result.ShouldAbortCompletion ? null : result.Symbols;
+        }
 
-            if (result.ShouldAbortCompletion || result.Symbols is null)
-                return Array.Empty<CompletionItem>();
+        var pattern = expressionInfo.Pattern ?? string.Empty;
+        var prefixStart = caretOffset - pattern.Length;
+        var keyword = prefixStart > 0
+            ? _language.LanguageIntellisenseSupport.TestForKeyword(textBeforeCaret, prefixStart - 1)
+            : PascalABCCompiler.Parsers.KeywordKind.None;
 
-            _language.LanguageIntellisenseSupport.RenameOrExcludeSpecialNames(result.Symbols);
+        if (_language.LanguageIntellisenseSupport.IsDefinitionIdentifierAfterKeyword(keyword))
+            return null;
 
-            return result.Symbols
-                .Where(symbol => symbol is not null && !symbol.not_include)
-                .Select(symbol =>
-                {
-                    var (detail, documentation) = SymbolDescriptionParser.Split(symbol.description ?? string.Empty);
-                    return new CompletionItem(
-                        string.IsNullOrEmpty(symbol.aliasName) ? symbol.name : symbol.aliasName,
-                        detail,
-                        documentation,
-                        symbol.kind.ToString());
-                })
-                .DistinctBy(item => (item.Label.ToUpperInvariant(), item.Kind))
-                .ToArray();
-        }, cancellationToken);
+        var typeExpected = keyword == PascalABCCompiler.Parsers.KeywordKind.New ||
+                           _language.LanguageIntellisenseSupport.IsTypeAfterKeyword(keyword);
+        var namespaceExpected = _language.LanguageIntellisenseSupport.IsNamespaceAfterKeyword(keyword);
+        if (!namespaceExpected)
+        {
+            var keywords = typeExpected
+                ? CodeCompletionNameHelper.Helper.GetTypeKeywords()
+                : CodeCompletionNameHelper.Helper.GetKeywords();
+            items.AddRange(keywords.Select(keywordText =>
+                new CompletionItem(keywordText, null, null, "Keyword")));
+        }
+
+        if (namespaceExpected)
+            return GetNamespaceSymbols(state.DomConverter);
+
+        return CompletionSymbolService.GetSymbolsByFirstCharacter(
+            state.DomConverter,
+            position.Line,
+            position.Character,
+            typeExpected,
+            namespaceExpected,
+            pattern,
+            smartIntellisense: true,
+            namespaceVisibleRange: 0);
+    }
+
+    private static SymInfo[] GetNamespaceSymbols(DomConverter domConverter)
+    {
+        var symbols = new List<SymInfo>();
+        if (DomConverter.standard_units is not null)
+            symbols.AddRange(DomConverter.standard_units.Where(symbol => symbol is not null));
+
+        var names = domConverter.visitor.entry_scope?.GetNamesInAllTopScopes(true, null, false);
+        if (names is not null)
+        {
+            symbols.AddRange(names.Where(symbol =>
+                symbol is not null &&
+                symbol.kind == SymbolKind.Namespace &&
+                !symbol.IsUnitNamespace));
+        }
+
+        return symbols.ToArray();
+    }
+
+    private static CompletionItem CreateCompletionItem(SymInfo symbol)
+    {
+        var (detail, documentation) = SymbolDescriptionParser.Split(symbol.description ?? string.Empty);
+        var label = symbol.aliasName ?? symbol.addit_name ?? symbol.name;
+        return new CompletionItem(label, detail, documentation, symbol.kind.ToString());
     }
 
     public Task<HoverInfo?> GetHoverAsync(

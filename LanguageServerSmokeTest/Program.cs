@@ -6,6 +6,8 @@ using PascalABCNet.LanguageServer;
 const string source = """
 program HeadlessSmoke;
 
+uses System.Collections.Generic;
+
 var
   text: string;
 
@@ -13,6 +15,8 @@ begin
   text := 'PascalABC.NET';
   var result := text.Substring(1);
   Writeln(result);
+  Print(result);
+  var values := new List<integer>;
 end.
 """;
 
@@ -122,6 +126,67 @@ Check(completion.RootElement.GetProperty("result").GetProperty("items")
     .EnumerateArray().Any(item => item.GetProperty("label").GetString() == "Substring"),
     "completion contains Substring");
 Console.WriteLine("PASS completion over stdio");
+
+var printStart = source.IndexOf("Print(result)", StringComparison.Ordinal);
+Check(printStart >= 0, "Global completion marker exists");
+
+await WriteRequestAsync(
+    input,
+    30,
+    "textDocument/completion",
+    documentUri,
+    GetPosition(source, printStart),
+    timeout.Token);
+using var invokedCompletion = await ReadResponseAsync(output, 30, timeout.Token);
+Check(GetCompletionLabels(invokedCompletion).Contains("Print"),
+    "invoked completion contains Print");
+
+await WriteRequestAsync(
+    input,
+    31,
+    "textDocument/completion",
+    documentUri,
+    GetPosition(source, printStart + "Pri".Length),
+    timeout.Token);
+using var prefixCompletion = await ReadResponseAsync(output, 31, timeout.Token);
+Check(GetCompletionLabels(prefixCompletion).Contains("Print"),
+    "prefix completion contains Print");
+
+var namespaceStart = source.IndexOf("System.Collections", StringComparison.Ordinal);
+await WriteRequestAsync(
+    input,
+    32,
+    "textDocument/completion",
+    documentUri,
+    GetPosition(source, namespaceStart + "Sys".Length),
+    timeout.Token);
+using var namespaceCompletion = await ReadResponseAsync(output, 32, timeout.Token);
+Check(GetCompletionLabels(namespaceCompletion).Contains("System"),
+    "namespace completion contains System after uses Sys");
+
+var typeStart = source.IndexOf("List<integer>", StringComparison.Ordinal);
+await WriteRequestAsync(
+    input,
+    33,
+    "textDocument/completion",
+    documentUri,
+    GetPosition(source, typeStart + "Lis".Length),
+    timeout.Token);
+using var typeCompletion = await ReadResponseAsync(output, 33, timeout.Token);
+Check(GetCompletionLabels(typeCompletion).Contains("List<>"),
+    "type completion contains List after new Lis");
+
+await WriteRequestAsync(
+    input,
+    34,
+    "textDocument/completion",
+    documentUri,
+    (0, 0),
+    timeout.Token);
+using var fileStartCompletion = await ReadResponseAsync(output, 34, timeout.Token);
+Check(GetCompletionLabels(fileStartCompletion).Contains("program"),
+    "completion at file start contains program");
+Console.WriteLine("PASS invoked, prefix, namespace and type completion over stdio");
 
 var hoverOffset = memberStart + "text.".Length + 1;
 var hoverPosition = GetPosition(source, hoverOffset);
