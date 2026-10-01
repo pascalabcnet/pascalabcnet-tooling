@@ -25,12 +25,14 @@ internal static class Program
         public string? command { get; set; }
         public string? fileName { get; set; }
         public string? outputDirectory { get; set; }
+        public string? runtimeModule { get; set; }
     }
 
     private sealed class WorkerCompileRequest
     {
         public string? fileName { get; set; }
         public string? outputDirectory { get; set; }
+        public string? runtimeModule { get; set; }
     }
 
     private static RequestSocket CreateClient(string address)
@@ -483,7 +485,8 @@ internal static class Program
                                 new WorkerCompileRequest
                                 {
                                     fileName = fileName,
-                                    outputDirectory = outputDirectory
+                                    outputDirectory = outputDirectory,
+                                    runtimeModule = request.runtimeModule
                                 });
                             var workerResponse = SendRequest(
                                 workerRequest, workerFileName, port, address,

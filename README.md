@@ -48,7 +48,7 @@ The LSP test starts the server as a separate process and verifies initialize, in
 dotnet run --project LanguageServerSmokeTest/LanguageServerSmokeTest.csproj
 ```
 
-The compiler-controller test builds both .NET Framework 4.7.2 and .NET 10 hosts, then verifies successful and failed compilation, repeated requests, automatic worker restart, and shutdown:
+The compiler-controller test builds both .NET Framework 4.7.2 and .NET 10 hosts, then verifies successful and failed compilation, repeated requests, automatic worker restart, and shutdown. For .NET 10 it also runs the PascalABC.NET `__RedirectIOMode` protocol end to end, including output without a newline, Cyrillic input/output, `Readln`, and runtime exceptions:
 
 ```powershell
 .\scripts\test-compiler-host.ps1 -Target all

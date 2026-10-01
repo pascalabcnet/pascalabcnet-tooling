@@ -62,9 +62,12 @@ function Copy-RuntimeTree {
     Copy-Item -Path (Join-Path $HostDirectory '*') -Destination $Destination `
         -Recurse -Force
     foreach ($dllName in $compilerDlls) {
-        $sourcePath = Join-Path $CompilerDirectory $dllName
-        Assert-FileExists $sourcePath
-        Copy-Item -LiteralPath $sourcePath -Destination $Destination -Force
+        $destinationPath = Join-Path $Destination $dllName
+        if (-not (Test-Path -LiteralPath $destinationPath -PathType Leaf)) {
+            $sourcePath = Join-Path $CompilerDirectory $dllName
+            Assert-FileExists $sourcePath
+            Copy-Item -LiteralPath $sourcePath -Destination $Destination -Force
+        }
     }
 
     foreach ($directoryName in @('Lib', 'Lng')) {
@@ -113,6 +116,17 @@ if ($Target -in @('all', 'net10')) {
     $modernRuntime = Join-Path $runtimeRoot 'net10'
     Copy-RuntimeTree (Join-Path $hostRoot 'net10') `
         (Join-Path $PascalABCSourcePath 'bin-net10') $modernRuntime
+    $redirectModuleName = '__RedirectIOMode'
+    $redirectModuleSource = Join-Path $PascalABCSourcePath `
+        "bin\Lib\$redirectModuleName.pas"
+    $modernLibrary = Join-Path $modernRuntime 'Lib'
+    Assert-FileExists $redirectModuleSource
+    Copy-Item -LiteralPath $redirectModuleSource -Destination $modernLibrary `
+        -Force
+    $staleRedirectPcu = Join-Path $modernLibrary "$redirectModuleName.pcu"
+    if (Test-Path -LiteralPath $staleRedirectPcu -PathType Leaf) {
+        Remove-Item -LiteralPath $staleRedirectPcu -Force
+    }
     Invoke-SmokeTest $modernRuntime 'net10'
 }
 

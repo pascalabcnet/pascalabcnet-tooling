@@ -104,7 +104,36 @@ try
     var recoveredCompile = await CompileAsync(process, 6, sourcePath, outputRoot);
     CheckSuccess(recoveredCompile, "compilation after an error");
 
-    var shutdown = await SendAsync(process, new { id = 7, command = "shutdown" });
+    await File.WriteAllTextAsync(
+        sourcePath,
+        "begin\n  Write('Без перевода строки: ');\n  var value: string;\n" +
+        "  Readln(value);\n  Writeln('Ответ: ', value);\nend.\n",
+        new UTF8Encoding(false));
+    var redirectedCompile = await CompileAsync(
+        process, 7, sourcePath, outputRoot, "__RedirectIOMode");
+    CheckSuccess(redirectedCompile, "compilation with __RedirectIOMode");
+    var redirectedOutput = redirectedCompile.GetProperty("outputFile").GetString();
+    Check(!string.IsNullOrWhiteSpace(redirectedOutput) && File.Exists(redirectedOutput),
+        "Redirected-I/O compilation produced an output file");
+
+    if (isNet10)
+    {
+        await CheckRedirectedInputOutputAsync(redirectedOutput!, sourceRoot);
+
+        await File.WriteAllTextAsync(
+            sourcePath,
+            "begin\n  raise new Exception('Тестовая ошибка выполнения');\nend.\n",
+            new UTF8Encoding(false));
+        var exceptionCompile = await CompileAsync(
+            process, 8, sourcePath, outputRoot, "__RedirectIOMode");
+        CheckSuccess(exceptionCompile, "exception sample with __RedirectIOMode");
+        var exceptionOutput = exceptionCompile.GetProperty("outputFile").GetString();
+        Check(!string.IsNullOrWhiteSpace(exceptionOutput) && File.Exists(exceptionOutput),
+            "Exception sample produced an output file");
+        await CheckRedirectedExceptionAsync(exceptionOutput!, sourceRoot);
+    }
+
+    var shutdown = await SendAsync(process, new { id = 9, command = "shutdown" });
     CheckSuccess(shutdown, "shutdown");
     Check(shutdown.GetProperty("result").GetString() == "shutdown",
         "Controller acknowledged shutdown");
@@ -147,14 +176,158 @@ static async Task<JsonElement> CompileAsync(
     Process process,
     int id,
     string sourcePath,
-    string outputRoot) =>
-    await SendAsync(process, new
+    string outputRoot,
+    string? runtimeModule = null)
+{
+    if (runtimeModule is null)
+    {
+        return await SendAsync(process, new
+        {
+            id,
+            command = "compile",
+            fileName = sourcePath,
+            outputDirectory = outputRoot
+        });
+    }
+
+    return await SendAsync(process, new
     {
         id,
         command = "compile",
         fileName = sourcePath,
-        outputDirectory = outputRoot
+        outputDirectory = outputRoot,
+        runtimeModule
     });
+}
+
+static async Task CheckRedirectedInputOutputAsync(
+    string outputFile,
+    string workingDirectory)
+{
+    using var program = StartRedirectedProgram(outputFile, workingDirectory);
+    try
+    {
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
+        var outputSeen = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var readSignalSeen = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var stdoutTask = CaptureAsync(
+            program.StandardOutput,
+            stdout,
+            "Без перевода строки: ",
+            outputSeen);
+        var stderrTask = CaptureAsync(
+            program.StandardError,
+            stderr,
+            "[READLNSIGNAL]",
+            readSignalSeen);
+
+        await program.StandardInput.WriteLineAsync("GO");
+        await program.StandardInput.FlushAsync();
+        await outputSeen.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await readSignalSeen.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Check(true, "redirected output without a newline arrived before input");
+        Check(true, "runtime emitted [READLNSIGNAL]");
+
+        await program.StandardInput.WriteLineAsync("Привет из теста");
+        await program.StandardInput.FlushAsync();
+        await program.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await Task.WhenAll(stdoutTask, stderrTask);
+
+        Check(program.ExitCode == 0, "redirected-I/O sample exited successfully");
+        Check(stdout.ToString().Contains("Ответ: Привет из теста", StringComparison.Ordinal),
+            "redirected stdin and Cyrillic stdout round-trip");
+    }
+    finally
+    {
+        StopTestProcess(program);
+    }
+}
+
+static async Task CheckRedirectedExceptionAsync(
+    string outputFile,
+    string workingDirectory)
+{
+    using var program = StartRedirectedProgram(outputFile, workingDirectory);
+    try
+    {
+        var stdoutTask = program.StandardOutput.ReadToEndAsync();
+        var stderrTask = program.StandardError.ReadToEndAsync();
+
+        await program.StandardInput.WriteLineAsync("GO");
+        await program.StandardInput.FlushAsync();
+        await program.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        var stderr = await stderrTask;
+        await stdoutTask;
+
+        Check(stderr.Contains("[EXCEPTION]", StringComparison.Ordinal),
+            "runtime emitted [EXCEPTION]");
+        Check(stderr.Contains("[MESSAGE]Тестовая ошибка выполнения", StringComparison.Ordinal),
+            "runtime exception preserved its Cyrillic message");
+        Check(stderr.Contains("[STACK]", StringComparison.Ordinal) &&
+              stderr.Contains("[END]", StringComparison.Ordinal),
+            "runtime exception included stack and end markers");
+    }
+    finally
+    {
+        StopTestProcess(program);
+    }
+}
+
+static void StopTestProcess(Process process)
+{
+    if (process.HasExited)
+        return;
+    process.Kill(entireProcessTree: true);
+    process.WaitForExit();
+}
+
+static Process StartRedirectedProgram(string outputFile, string workingDirectory)
+{
+    var startInfo = new ProcessStartInfo
+    {
+        FileName = ResolveDotnet(),
+        WorkingDirectory = workingDirectory,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardInput = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        StandardInputEncoding = new UTF8Encoding(false),
+        StandardOutputEncoding = new UTF8Encoding(false),
+        StandardErrorEncoding = new UTF8Encoding(false)
+    };
+    startInfo.ArgumentList.Add(outputFile);
+    startInfo.ArgumentList.Add("[REDIRECTIOMODE]");
+
+    var process = new Process { StartInfo = startInfo };
+    if (!process.Start())
+    {
+        process.Dispose();
+        throw new InvalidOperationException("Could not start compiled .NET 10 program.");
+    }
+    return process;
+}
+
+static async Task CaptureAsync(
+    StreamReader reader,
+    StringBuilder destination,
+    string marker,
+    TaskCompletionSource<bool> markerSeen)
+{
+    var buffer = new char[256];
+    while (true)
+    {
+        var count = await reader.ReadAsync(buffer);
+        if (count == 0)
+            break;
+        destination.Append(buffer, 0, count);
+        if (destination.ToString().Contains(marker, StringComparison.Ordinal))
+            markerSeen.TrySetResult(true);
+    }
+}
 
 static async Task<JsonElement> SendAsync(Process process, object request)
 {

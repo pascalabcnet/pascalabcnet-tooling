@@ -18,16 +18,37 @@ Compile:
 {"id":2,"command":"compile","fileName":"C:\\work\\Program.pas","outputDirectory":"C:\\work\\out"}
 ```
 
+Compile with an IDE runtime service module:
+
+```json
+{"id":3,"command":"compile","fileName":"C:\\work\\Program.pas","outputDirectory":"C:\\work\\out","runtimeModule":"__RedirectIOMode"}
+```
+
+`runtimeModule` is an optional string. When present, the worker appends that
+module to `CompilerOptions.StandardModules` for every registered language with
+`StandardModuleAddMethod.RightToMain`. This is the same ordering used by the
+classic PascalABC.NET IDE: the module is added on the right of the `uses` list
+of the main program only. The user's source text is not rewritten. Omitting the
+field preserves ordinary compilation behaviour.
+
+The named module must be available through the compiler's normal unit search
+paths. The standard `__RedirectIOMode` module is included in `Lib`. Start its
+compiled .NET 10 program through `dotnet`, pass `[REDIRECTIOMODE]`, redirect all
+three standard streams, and write `GO` followed by a newline to stdin. The
+module retains the PascalABC.NET IDE protocol on stderr, including
+`[READLNSIGNAL]`, `[CODEPAGE...]`, and
+`[EXCEPTION]...[MESSAGE]...[STACK]...[END]`.
+
 Restart the worker:
 
 ```json
-{"id":3,"command":"restart"}
+{"id":4,"command":"restart"}
 ```
 
 Shut down the worker and controller:
 
 ```json
-{"id":4,"command":"shutdown"}
+{"id":5,"command":"shutdown"}
 ```
 
 Every response repeats `id` and contains `success`. Compile responses also contain `diagnostics`, `outputFile`, `message`, `fileName`, `compilationCount`, `workerPid`, and `workingSetMB` where applicable.

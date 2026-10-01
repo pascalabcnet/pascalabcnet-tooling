@@ -20,6 +20,7 @@ internal static class Program
     {
         public string? fileName { get; set; }
         public string? outputDirectory { get; set; }
+        public string? runtimeModule { get; set; }
     }
 
     private static CompileRequest DeserializeCompileRequest(string json)
@@ -63,6 +64,18 @@ internal static class Program
                 var outputDirectory = Path.GetFullPath(request.outputDirectory);
                 Directory.CreateDirectory(outputDirectory);
                 options.OutputDirectory = outputDirectory;
+            }
+
+            var runtimeModule = request.runtimeModule;
+            if (!string.IsNullOrWhiteSpace(runtimeModule))
+            {
+                foreach (var languageModules in options.StandardModules)
+                {
+                    languageModules.Value.Add(new CompilerOptions.StandardModule(
+                        runtimeModule!.Trim(),
+                        CompilerOptions.StandardModuleAddMethod.RightToMain,
+                        languageModules.Key));
+                }
             }
 
             compiler.Reload();

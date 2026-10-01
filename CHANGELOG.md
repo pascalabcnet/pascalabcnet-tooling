@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Editor-neutral compiler controller and isolated compiler worker for .NET Framework 4.7.2 and .NET 10.
 - Reproducible compiler-host build script and end-to-end controller smoke tests.
 - Documentation for the JSON Lines controller protocol and worker lifecycle.
+- Optional `runtimeModule` compile field using PascalABC.NET standard-module injection for IDE runtime services.
+- End-to-end .NET 10 coverage for the existing `__RedirectIOMode` stream protocol.
 
 ### Changed
 
