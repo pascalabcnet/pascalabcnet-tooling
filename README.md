@@ -2,10 +2,12 @@
 
 Editor-neutral language tooling for PascalABC.NET.
 
-The repository contains two production projects:
+The repository contains four production projects:
 
 - `PascalABCNet.LanguageServices` - document storage and an editor-neutral adapter over the PascalABC.NET semantic and code-completion APIs;
 - `PascalABCNet.LanguageServer` - an LSP server using StreamJsonRpc and standard input/output transport.
+- `PascalABCNet.CompilerController` - a JSON Lines controller used by editor integrations to manage compiler worker lifetime;
+- `PascalABCNet.CompilerWorker` - an isolated PascalABC.NET compilation process reached by the controller over loopback NetMQ.
 
 The PascalABC.NET compiler is included as the `pascalabcnet` Git submodule. The tooling repository does not contain a copied compiler source tree.
 
@@ -46,6 +48,20 @@ The LSP test starts the server as a separate process and verifies initialize, in
 dotnet run --project LanguageServerSmokeTest/LanguageServerSmokeTest.csproj
 ```
 
+The compiler-controller test builds both .NET Framework 4.7.2 and .NET 10 hosts, then verifies successful and failed compilation, repeated requests, automatic worker restart, and shutdown:
+
+```powershell
+.\scripts\test-compiler-host.ps1 -Target all
+```
+
+To build redistributable compiler-host binaries without running tests:
+
+```powershell
+.\scripts\build-compiler-host.ps1 -Target all
+```
+
+The controller protocol and lifecycle are documented in [docs/compiler-controller-protocol.md](docs/compiler-controller-protocol.md).
+
 ## Continuous integration
 
 GitHub Actions checks every pull request and every push to `main`. The workflow checks out the PascalABC.NET submodule, builds the complete solution on Windows with .NET 10, and runs both smoke-test projects.
@@ -71,7 +87,7 @@ PascalABCNet.LanguageServices
 PascalABC.NET (Git submodule)
 ```
 
-The language-service layer has no dependency on VS Code, LSP DTOs, WinForms, `ICSharpCode.TextEditor`, or the legacy PascalABC.NET workbench. IntelliSense operations are serialized because the underlying PascalABC.NET semantic services are process-global and are not safe for parallel execution.
+The language-service layer has no dependency on VS Code, LSP DTOs, WinForms, `ICSharpCode.TextEditor`, or the legacy PascalABC.NET workbench. IntelliSense operations are serialized because the underlying PascalABC.NET semantic services are process-global and are not safe for parallel execution. The compiler controller is a separate editor-neutral service; it is not part of the LSP process.
 
 ## Project status
 

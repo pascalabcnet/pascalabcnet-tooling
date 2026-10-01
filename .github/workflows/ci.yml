@@ -44,3 +44,7 @@ jobs:
         run: dotnet run --project LanguageServerSmokeTest/LanguageServerSmokeTest.csproj --configuration Release --no-build
         env:
           PABC_TOOLING_SERVER_ASSEMBLY: ${{ github.workspace }}\PascalABCNet.LanguageServer\bin\Release\net10.0\PascalABCNet.LanguageServer.dll
+
+      - name: Run compiler controller smoke tests
+        shell: powershell
+        run: .\scripts\test-compiler-host.ps1 -Target all
