@@ -104,13 +104,24 @@ try
     var recoveredCompile = await CompileAsync(process, 6, sourcePath, outputRoot);
     CheckSuccess(recoveredCompile, "compilation after an error");
 
+    await CheckSourceSnapshotsAsync(
+        process, sourceRoot, outputRoot, isNet10, firstRequestId: 7);
+
     await File.WriteAllTextAsync(
         sourcePath,
         "begin\n  Write('Без перевода строки: ');\n  var value: string;\n" +
         "  Readln(value);\n  Writeln('Ответ: ', value);\nend.\n",
         new UTF8Encoding(false));
     var redirectedCompile = await CompileAsync(
-        process, 7, sourcePath, outputRoot, "__RedirectIOMode");
+        process, 20, sourcePath, outputRoot, "__RedirectIOMode",
+        new[]
+        {
+            new SourceFileInput(
+                sourcePath,
+                "begin\n  Write('Без перевода строки: ');\n" +
+                "  var value: string;\n  Readln(value);\n" +
+                "  Writeln('Ответ: ', value);\nend.\n")
+        });
     CheckSuccess(redirectedCompile, "compilation with __RedirectIOMode");
     var redirectedOutput = redirectedCompile.GetProperty("outputFile").GetString();
     Check(!string.IsNullOrWhiteSpace(redirectedOutput) && File.Exists(redirectedOutput),
@@ -125,7 +136,7 @@ try
             "begin\n  raise new Exception('Тестовая ошибка выполнения');\nend.\n",
             new UTF8Encoding(false));
         var exceptionCompile = await CompileAsync(
-            process, 8, sourcePath, outputRoot, "__RedirectIOMode");
+            process, 21, sourcePath, outputRoot, "__RedirectIOMode");
         CheckSuccess(exceptionCompile, "exception sample with __RedirectIOMode");
         var exceptionOutput = exceptionCompile.GetProperty("outputFile").GetString();
         Check(!string.IsNullOrWhiteSpace(exceptionOutput) && File.Exists(exceptionOutput),
@@ -133,7 +144,7 @@ try
         await CheckRedirectedExceptionAsync(exceptionOutput!, sourceRoot);
     }
 
-    var shutdown = await SendAsync(process, new { id = 9, command = "shutdown" });
+    var shutdown = await SendAsync(process, new { id = 22, command = "shutdown" });
     CheckSuccess(shutdown, "shutdown");
     Check(shutdown.GetProperty("result").GetString() == "shutdown",
         "Controller acknowledged shutdown");
@@ -177,27 +188,176 @@ static async Task<JsonElement> CompileAsync(
     int id,
     string sourcePath,
     string outputRoot,
-    string? runtimeModule = null)
+    string? runtimeModule = null,
+    IReadOnlyList<SourceFileInput>? sourceFiles = null)
 {
-    if (runtimeModule is null)
+    var request = new Dictionary<string, object?>
     {
-        return await SendAsync(process, new
+        ["id"] = id,
+        ["command"] = "compile",
+        ["fileName"] = sourcePath,
+        ["outputDirectory"] = outputRoot
+    };
+    if (runtimeModule is not null)
+        request["runtimeModule"] = runtimeModule;
+    if (sourceFiles is not null)
+        request["sourceFiles"] = sourceFiles;
+    return await SendAsync(process, request);
+}
+
+static async Task CheckSourceSnapshotsAsync(
+    Process process,
+    string sourceRoot,
+    string outputRoot,
+    bool isNet10,
+    int firstRequestId)
+{
+    var mainPath = Path.Combine(sourceRoot, "SnapshotMain.pas");
+    await File.WriteAllTextAsync(
+        mainPath, "begin Println('old disk main') end.", new UTF8Encoding(false));
+    var changedMain = await CompileAsync(
+        process, firstRequestId, mainPath, outputRoot, sourceFiles: new[]
         {
-            id,
-            command = "compile",
-            fileName = sourcePath,
-            outputDirectory = outputRoot
+            new SourceFileInput(mainPath, "begin Println('new snapshot main') end.")
         });
+    CheckSuccess(changedMain, "changed main source from snapshot");
+    Check(await RunAndCaptureAsync(
+            changedMain.GetProperty("outputFile").GetString()!, sourceRoot, isNet10) ==
+          "new snapshot main",
+        "snapshot text overrides older main file on disk");
+
+    var virtualMainPath = Path.Combine(sourceRoot, "VirtualMain.pas");
+    var virtualMain = await CompileAsync(
+        process, firstRequestId + 1, virtualMainPath, outputRoot,
+        sourceFiles: new[]
+        {
+            new SourceFileInput(
+                virtualMainPath, "begin Println('virtual main') end.")
+        });
+    CheckSuccess(virtualMain, "fully virtual main source");
+    Check(await RunAndCaptureAsync(
+            virtualMain.GetProperty("outputFile").GetString()!, sourceRoot, isNet10) ==
+          "virtual main",
+        "fully virtual main produced the snapshot program");
+
+    var diskUnitPath = Path.Combine(sourceRoot, "DiskSnapshotUnit.pas");
+    var virtualUnitPath = Path.Combine(sourceRoot, "VirtualSnapshotUnit.pas");
+    await File.WriteAllTextAsync(
+        diskUnitPath,
+        "unit DiskSnapshotUnit; interface function DiskValue: integer; " +
+        "implementation function DiskValue := 3; end.",
+        new UTF8Encoding(false));
+    await File.WriteAllTextAsync(
+        mainPath,
+        "uses DiskSnapshotUnit, VirtualSnapshotUnit; " +
+        "begin var result := DiskValue + VirtualValue end.",
+        new UTF8Encoding(false));
+
+    var mixedCompile = await CompileAsync(
+        process, firstRequestId + 2, mainPath, outputRoot,
+        sourceFiles: new[]
+        {
+            new SourceFileInput(
+                virtualUnitPath,
+                "unit VirtualSnapshotUnit; interface function VirtualValue: integer; " +
+                "implementation function VirtualValue := 7; end.")
+        });
+    CheckSuccess(mixedCompile, "mixed virtual and on-disk modules");
+    Check(true, "virtual module and disk module were compiled together");
+
+    await File.WriteAllTextAsync(
+        diskUnitPath,
+        "unit DiskSnapshotUnit; interface function DiskValue: integer; " +
+        "implementation function DiskValue := 1; end.",
+        new UTF8Encoding(false));
+    await File.WriteAllTextAsync(
+        mainPath,
+        "uses DiskSnapshotUnit; " +
+        "begin var result := DiskValue end.",
+        new UTF8Encoding(false));
+
+    var diskPcuCompile = await CompileAsync(
+        process, firstRequestId + 3, mainPath, outputRoot);
+    CheckSuccess(diskPcuCompile, "baseline disk module before snapshots");
+
+    foreach (var testCase in new[] { (Id: firstRequestId + 4, Value: 11), (Id: firstRequestId + 5, Value: 22) })
+    {
+        var snapshotFunction = "SnapshotValue" + testCase.Value;
+        var compile = await CompileAsync(
+            process, testCase.Id, mainPath, outputRoot,
+            sourceFiles: new[]
+            {
+                new SourceFileInput(
+                    mainPath,
+                    "uses DiskSnapshotUnit; " +
+                    $"begin var result := {snapshotFunction} end."),
+                new SourceFileInput(
+                    diskUnitPath,
+                    "unit DiskSnapshotUnit; interface " +
+                    $"function {snapshotFunction}: integer; implementation " +
+                    $"function {snapshotFunction} := {testCase.Value}; end.")
+            });
+        CheckSuccess(compile, $"module snapshot value {testCase.Value}");
+        Check(true, "new module snapshot overrides disk and stale PCU");
     }
 
-    return await SendAsync(process, new
+    var diskFallback = await CompileAsync(
+        process, firstRequestId + 6, mainPath, outputRoot);
+    CheckSuccess(diskFallback, "request after snapshot without sourceFiles");
+    Check(true, "snapshot does not leak into the next request");
+
+    var invalidUnitPath = Path.Combine(sourceRoot, "InvalidSnapshotUnit.pas");
+    await File.WriteAllTextAsync(
+        mainPath,
+        "uses InvalidSnapshotUnit; begin end.",
+        new UTF8Encoding(false));
+    var invalidModule = await CompileAsync(
+        process, firstRequestId + 7, mainPath, outputRoot,
+        sourceFiles: new[]
+        {
+            new SourceFileInput(
+                invalidUnitPath,
+                "unit InvalidSnapshotUnit;\ninterface\nprocedure Broken;\n" +
+                "implementation\nprocedure Broken;\nbegin\n  this is invalid\nend;\nend.")
+        });
+    Check(!invalidModule.GetProperty("success").GetBoolean(),
+        "error in virtual module was rejected");
+    var diagnostic = invalidModule.GetProperty("diagnostics")[0];
+    Check(Path.GetFullPath(diagnostic.GetProperty("fileName").GetString()!) ==
+          Path.GetFullPath(invalidUnitPath),
+        "diagnostic identifies the virtual module");
+    Check(diagnostic.GetProperty("line").GetInt32() >= 6 &&
+          diagnostic.GetProperty("column").GetInt32() >= 1,
+        "diagnostic contains virtual-module coordinates");
+}
+
+static async Task<string> RunAndCaptureAsync(
+    string outputFile,
+    string workingDirectory,
+    bool isNet10)
+{
+    var startInfo = new ProcessStartInfo
     {
-        id,
-        command = "compile",
-        fileName = sourcePath,
-        outputDirectory = outputRoot,
-        runtimeModule
-    });
+        FileName = isNet10 ? ResolveDotnet() : outputFile,
+        WorkingDirectory = workingDirectory,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        StandardOutputEncoding = new UTF8Encoding(false),
+        StandardErrorEncoding = new UTF8Encoding(false)
+    };
+    if (isNet10)
+        startInfo.ArgumentList.Add(outputFile);
+    using var program = Process.Start(startInfo) ??
+                        throw new InvalidOperationException("Could not start compiled program.");
+    var stdoutTask = program.StandardOutput.ReadToEndAsync();
+    var stderrTask = program.StandardError.ReadToEndAsync();
+    await program.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    var stdout = await stdoutTask;
+    var stderr = await stderrTask;
+    Check(program.ExitCode == 0, "compiled snapshot program exited successfully: " + stderr);
+    return stdout.Trim();
 }
 
 static async Task CheckRedirectedInputOutputAsync(
@@ -388,3 +548,5 @@ static void Check(bool condition, string message)
         throw new InvalidOperationException("Smoke check failed: " + message);
     Console.WriteLine("PASS " + message);
 }
+
+internal sealed record SourceFileInput(string fileName, string text);

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using Languages.Integration;
@@ -21,6 +22,69 @@ internal static class Program
         public string? fileName { get; set; }
         public string? outputDirectory { get; set; }
         public string? runtimeModule { get; set; }
+        public SourceFileRequest[]? sourceFiles { get; set; }
+    }
+
+    private sealed class SourceFileRequest
+    {
+        public string? fileName { get; set; }
+        public string? text { get; set; }
+    }
+
+    private sealed class SourceFileSnapshot
+    {
+        private readonly Dictionary<string, string> files;
+
+        public SourceFileSnapshot(SourceFileRequest[] sourceFiles)
+        {
+            files = new Dictionary<string, string>(PathComparer);
+            foreach (var sourceFile in sourceFiles)
+            {
+                if (string.IsNullOrWhiteSpace(sourceFile.fileName))
+                    throw new InvalidDataException(
+                        "В sourceFiles не задано поле fileName");
+                if (!Path.IsPathRooted(sourceFile.fileName))
+                    throw new InvalidDataException(
+                        "sourceFiles.fileName должен быть абсолютным путём: " +
+                        sourceFile.fileName);
+                files[NormalizePath(sourceFile.fileName!)] = sourceFile.text ?? "";
+            }
+        }
+
+        public IEnumerable<string> FileNames => files.Keys;
+
+        public bool Contains(string fileName) =>
+            files.ContainsKey(NormalizePath(fileName));
+
+        public object? Provide(string fileName, PascalABCCompiler.CoreUtils.SourceFileOperation operation)
+        {
+            var normalized = NormalizePath(fileName);
+            if (files.TryGetValue(normalized, out var text))
+            {
+                switch (operation)
+                {
+                    case PascalABCCompiler.CoreUtils.SourceFileOperation.GetText:
+                        return text;
+                    case PascalABCCompiler.CoreUtils.SourceFileOperation.Exists:
+                        return true;
+                    case PascalABCCompiler.CoreUtils.SourceFileOperation.GetLastWriteTime:
+                        return DateTime.MaxValue;
+                    case PascalABCCompiler.CoreUtils.SourceFileOperation.FileEncoding:
+                        return new UTF8Encoding(false);
+                }
+            }
+
+            return PascalABCCompiler.CoreUtils.SourceFilesProviders
+                .DefaultSourceFilesProvider(normalized, operation);
+        }
+
+        private static StringComparer PathComparer =>
+            Path.DirectorySeparatorChar == '\\'
+                ? StringComparer.OrdinalIgnoreCase
+                : StringComparer.Ordinal;
+
+        private static string NormalizePath(string fileName) =>
+            Path.GetFullPath(fileName);
     }
 
     private static CompileRequest DeserializeCompileRequest(string json)
@@ -43,7 +107,11 @@ internal static class Program
             var request = DeserializeCompileRequest(requestJson);
             var fileName = request.fileName ?? "";
             var fullFileName = Path.GetFullPath(fileName);
-            if (!File.Exists(fullFileName))
+            var snapshot = request.sourceFiles != null
+                ? new SourceFileSnapshot(request.sourceFiles)
+                : null;
+            if (!File.Exists(fullFileName) &&
+                (snapshot == null || !snapshot.Contains(fullFileName)))
             {
                 response.AppendLine("ERROR");
                 response.AppendLine("Файл не найден: " + fullFileName);
@@ -58,6 +126,11 @@ internal static class Program
                 Debug = false,
                 ForDebugging = false
             };
+
+            if (snapshot != null)
+            {
+                options.SavePCU = false;
+            }
 
             if (!string.IsNullOrWhiteSpace(request.outputDirectory))
             {
@@ -78,8 +151,21 @@ internal static class Program
                 }
             }
 
-            compiler.Reload();
-            var outputFileName = compiler.Compile(options);
+            var requestCompiler = compiler;
+            if (snapshot != null)
+            {
+                requestCompiler = new Compiler();
+                requestCompiler.SourceFilesProvider = snapshot.Provide;
+                requestCompiler.OnChangeCompilerState += (_, state, currentFileName) =>
+                {
+                    if (state == CompilerState.BeginCompileFile)
+                        RegisterSnapshotPaths(
+                            requestCompiler, snapshot, currentFileName);
+                };
+            }
+
+            requestCompiler.Reload();
+            var outputFileName = requestCompiler.Compile(options);
 
             if (outputFileName != null)
             {
@@ -89,14 +175,14 @@ internal static class Program
             else
             {
                 response.AppendLine("ERROR");
-                if (compiler.ErrorsList.Count == 0)
+                if (requestCompiler.ErrorsList.Count == 0)
                 {
                     response.AppendLine("Компилятор не создал выходной файл");
                 }
                 else
                 {
-                    foreach (var error in compiler.ErrorsList)
-                        response.AppendLine(EnhanceErrorMessage(error));
+                    foreach (var error in requestCompiler.ErrorsList)
+                        AppendDiagnostic(response, error, fullFileName);
                 }
             }
         }
@@ -109,6 +195,90 @@ internal static class Program
 
         return response.ToString();
     }
+
+    private static void RegisterSnapshotPaths(
+        Compiler compiler,
+        SourceFileSnapshot snapshot,
+        string? currentFileName)
+    {
+        var currentDirectory = string.IsNullOrWhiteSpace(currentFileName)
+            ? compiler.CompilerOptions.SourceFileDirectory
+            : Path.GetDirectoryName(Path.GetFullPath(currentFileName));
+        var normalizedCurrentDirectory = currentDirectory?.ToLowerInvariant();
+
+        foreach (var snapshotFileName in snapshot.FileNames)
+        {
+            var names = new List<string>
+            {
+                Path.GetFileNameWithoutExtension(snapshotFileName),
+                Path.GetFileName(snapshotFileName),
+                Path.ChangeExtension(snapshotFileName, null),
+                snapshotFileName
+            };
+
+            if (currentDirectory != null)
+            {
+                var relativeName = MakeRelativePath(currentDirectory, snapshotFileName);
+                names.Add(relativeName);
+                names.Add(Path.ChangeExtension(relativeName, null));
+            }
+
+            foreach (var name in names)
+            {
+                var key = Tuple.Create(
+                    name.ToLowerInvariant(), normalizedCurrentDirectory);
+                if (!compiler.SourceFileNamesDictionary.ContainsKey(key))
+                {
+                    compiler.SourceFileNamesDictionary[key] = Tuple.Create(
+                        snapshotFileName, 0);
+                }
+            }
+        }
+    }
+
+    private static string MakeRelativePath(string directory, string fileName)
+    {
+        var directoryUri = new Uri(AppendDirectorySeparator(directory));
+        var fileUri = new Uri(fileName);
+        if (!string.Equals(
+                directoryUri.Scheme, fileUri.Scheme,
+                StringComparison.OrdinalIgnoreCase))
+            return fileName;
+        return Uri.UnescapeDataString(
+                directoryUri.MakeRelativeUri(fileUri).ToString())
+            .Replace('/', Path.DirectorySeparatorChar);
+    }
+
+    private static string AppendDirectorySeparator(string directory) =>
+        directory.EndsWith(Path.DirectorySeparatorChar.ToString(),
+            StringComparison.Ordinal)
+            ? directory
+            : directory + Path.DirectorySeparatorChar;
+
+    private static void AppendDiagnostic(
+        StringBuilder response,
+        object error,
+        string defaultFileName)
+    {
+        var locatedError = error as LocatedError;
+        var location = locatedError?.SourceLocation;
+        var fileName = location?.FileName ?? locatedError?.FileName ?? defaultFileName;
+        var line = location?.BeginPosition.Line ?? 1;
+        var column = location?.BeginPosition.Column ?? 1;
+        var message = EnhanceErrorMessage(error);
+
+        response.Append("DIAGNOSTIC\t");
+        response.Append(EncodeBase64(fileName));
+        response.Append('\t');
+        response.Append(line);
+        response.Append('\t');
+        response.Append(column);
+        response.Append('\t');
+        response.AppendLine(EncodeBase64(message));
+    }
+
+    private static string EncodeBase64(string value) =>
+        Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
 
     private static string EnhanceErrorMessage(object error)
     {

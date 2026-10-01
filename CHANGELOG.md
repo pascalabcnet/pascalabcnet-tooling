@@ -13,6 +13,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Documentation for the JSON Lines controller protocol and worker lifecycle.
 - Optional `runtimeModule` compile field using PascalABC.NET standard-module injection for IDE runtime services.
 - End-to-end .NET 10 coverage for the existing `__RedirectIOMode` stream protocol.
+- Optional per-request `sourceFiles` snapshots for unsaved main programs and units.
+- Cross-target regression coverage for virtual sources, disk fallback, stale PCUs,
+  module diagnostics, and `runtimeModule` combined with an in-memory snapshot.
 
 ### Changed
 

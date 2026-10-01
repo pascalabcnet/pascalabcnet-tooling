@@ -24,6 +24,29 @@ Compile with an IDE runtime service module:
 {"id":3,"command":"compile","fileName":"C:\\work\\Program.pas","outputDirectory":"C:\\work\\out","runtimeModule":"__RedirectIOMode"}
 ```
 
+Compile an in-memory snapshot of open editor documents:
+
+```json
+{"id":4,"command":"compile","fileName":"C:\\work\\Program.pas","outputDirectory":"C:\\work\\out","runtimeModule":"__RedirectIOMode","sourceFiles":[{"fileName":"C:\\work\\Program.pas","text":"uses Helpers; begin Println(GetValue) end."},{"fileName":"C:\\work\\Helpers.pas","text":"unit Helpers; interface function GetValue: integer; implementation function GetValue := 42; end."}]}
+```
+
+`sourceFiles` is an optional array of `{ "fileName", "text" }` objects. Each
+`fileName` must be an absolute source path (the controller normalizes it before
+forwarding the request). `fileName` at the top level still identifies the main
+program. A snapshot entry takes precedence over the file with the same path on
+disk; files absent from the snapshot are read normally from disk. The main
+program and used units may exist only in the snapshot.
+
+Snapshot path comparison follows the host platform: case-insensitive on
+Windows and case-sensitive on Linux/macOS. A snapshot is scoped to one compile
+request. Snapshot compilations do not save PCUs, and snapshot sources take
+precedence over existing PCUs, so unsaved text cannot leak into a later request.
+Omitting `sourceFiles` preserves ordinary disk-based compilation behaviour.
+
+Diagnostics contain the normalized path and source coordinates of the actual
+main program or unit that produced the error, including virtual snapshot files.
+`sourceFiles` and `runtimeModule` may be used together.
+
 `runtimeModule` is an optional string. When present, the worker appends that
 module to `CompilerOptions.StandardModules` for every registered language with
 `StandardModuleAddMethod.RightToMain`. This is the same ordering used by the
@@ -42,13 +65,13 @@ module retains the PascalABC.NET IDE protocol on stderr, including
 Restart the worker:
 
 ```json
-{"id":4,"command":"restart"}
+{"id":5,"command":"restart"}
 ```
 
 Shut down the worker and controller:
 
 ```json
-{"id":5,"command":"shutdown"}
+{"id":6,"command":"shutdown"}
 ```
 
 Every response repeats `id` and contains `success`. Compile responses also contain `diagnostics`, `outputFile`, `message`, `fileName`, `compilationCount`, `workerPid`, and `workingSetMB` where applicable.

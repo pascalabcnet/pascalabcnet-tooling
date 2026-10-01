@@ -109,6 +109,18 @@ if ($Target -in @('all', 'net-framework')) {
     $legacyRuntime = Join-Path $runtimeRoot 'net-framework'
     Copy-RuntimeTree (Join-Path $hostRoot 'net-framework') `
         (Join-Path $PascalABCSourcePath 'bin') $legacyRuntime
+    # The checked-in legacy PABCSystem PCU is the compatible net472 artifact.
+    # A newer modern source timestamp must not make the legacy worker parse it.
+    $legacySystemSource = Join-Path $legacyRuntime 'Lib\PABCSystem.pas'
+    $legacySystemPcu = Join-Path $legacyRuntime 'Lib\PABCSystem.pcu'
+    if ((Test-Path -LiteralPath $legacySystemSource -PathType Leaf) -and
+        (Test-Path -LiteralPath $legacySystemPcu -PathType Leaf)) {
+        $sourceTime = (Get-Item -LiteralPath $legacySystemSource).LastWriteTimeUtc
+        $pcuItem = Get-Item -LiteralPath $legacySystemPcu
+        if ($pcuItem.LastWriteTimeUtc -le $sourceTime) {
+            $pcuItem.LastWriteTimeUtc = $sourceTime.AddSeconds(1)
+        }
+    }
     Invoke-SmokeTest $legacyRuntime 'net-framework'
 }
 

@@ -26,6 +26,13 @@ internal static class Program
         public string? fileName { get; set; }
         public string? outputDirectory { get; set; }
         public string? runtimeModule { get; set; }
+        public SourceFileRequest[]? sourceFiles { get; set; }
+    }
+
+    private sealed class SourceFileRequest
+    {
+        public string? fileName { get; set; }
+        public string? text { get; set; }
     }
 
     private sealed class WorkerCompileRequest
@@ -33,6 +40,7 @@ internal static class Program
         public string? fileName { get; set; }
         public string? outputDirectory { get; set; }
         public string? runtimeModule { get; set; }
+        public SourceFileRequest[]? sourceFiles { get; set; }
     }
 
     private static RequestSocket CreateClient(string address)
@@ -363,6 +371,31 @@ internal static class Program
             var line = lines[index].Trim();
             if (line.Length == 0)
                 continue;
+
+            if (line.StartsWith("DIAGNOSTIC\t", StringComparison.Ordinal))
+            {
+                var parts = line.Split('\t');
+                if (parts.Length == 5 &&
+                    int.TryParse(parts[2], out var diagnosticLine) &&
+                    int.TryParse(parts[3], out var diagnosticColumn))
+                {
+                    var diagnosticFileName = DecodeBase64(parts[1]);
+                    var diagnosticMessage = DecodeBase64(parts[4]);
+                    diagnostics.Add(new Dictionary<string, object?>
+                    {
+                        ["fileName"] = diagnosticFileName,
+                        ["line"] = diagnosticLine,
+                        ["column"] = diagnosticColumn,
+                        ["severity"] = "error",
+                        ["message"] = diagnosticMessage
+                    });
+                    if (message.Length > 0)
+                        message.AppendLine();
+                    message.Append(diagnosticMessage);
+                    continue;
+                }
+            }
+
             if (message.Length > 0)
                 message.AppendLine();
             message.Append(line);
@@ -392,6 +425,9 @@ internal static class Program
             ? workerResponse
             : message.ToString();
     }
+
+    private static string DecodeBase64(string value) =>
+        Encoding.UTF8.GetString(Convert.FromBase64String(value));
 
     private static string GetDefaultWorkerFileName()
     {
@@ -474,6 +510,22 @@ internal static class Program
                             }
 
                             fileName = Path.GetFullPath(fileName);
+                            var sourceFiles = request.sourceFiles;
+                            if (sourceFiles != null)
+                            {
+                                foreach (var sourceFile in sourceFiles)
+                                {
+                                    if (string.IsNullOrWhiteSpace(sourceFile.fileName))
+                                        throw new InvalidDataException(
+                                            "В sourceFiles не задано поле fileName");
+                                    if (!Path.IsPathRooted(sourceFile.fileName))
+                                        throw new InvalidDataException(
+                                            "sourceFiles.fileName должен быть абсолютным путём: " +
+                                            sourceFile.fileName);
+                                    sourceFile.fileName = Path.GetFullPath(sourceFile.fileName);
+                                    sourceFile.text ??= "";
+                                }
+                            }
                             var outputDirectory = request.outputDirectory;
                             if (!string.IsNullOrWhiteSpace(outputDirectory))
                             {
@@ -486,7 +538,8 @@ internal static class Program
                                 {
                                     fileName = fileName,
                                     outputDirectory = outputDirectory,
-                                    runtimeModule = request.runtimeModule
+                                    runtimeModule = request.runtimeModule,
+                                    sourceFiles = sourceFiles
                                 });
                             var workerResponse = SendRequest(
                                 workerRequest, workerFileName, port, address,

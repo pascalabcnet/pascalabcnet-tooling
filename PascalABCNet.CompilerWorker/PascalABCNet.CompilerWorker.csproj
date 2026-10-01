@@ -41,6 +41,10 @@
       <HintPath>$(LegacyCompilerRoot)\Localization.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="PABCCoreUtils">
+      <HintPath>$(LegacyCompilerRoot)\PABCCoreUtils.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="SemanticTree">
       <HintPath>$(LegacyCompilerRoot)\SemanticTree.dll</HintPath>
       <Private>false</Private>
