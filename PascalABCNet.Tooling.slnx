@@ -6,7 +6,7 @@
     <Project Path="pascalabcnet/PascalABCNet.CompilerWorker/PascalABCNet.CompilerWorker.csproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="pascalabcnet/CompilerControllerSmokeTest/CompilerControllerSmokeTest.csproj" />
+    <Project Path="pascalabcnet/tests/CompilerControllerSmokeTest/CompilerControllerSmokeTest.csproj" />
     <Project Path="HeadlessSmokeTest/HeadlessSmokeTest.csproj" />
     <Project Path="LanguageServerSmokeTest/LanguageServerSmokeTest.csproj" />
   </Folder>
