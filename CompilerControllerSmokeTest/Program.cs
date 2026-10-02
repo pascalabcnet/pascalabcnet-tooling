@@ -23,6 +23,7 @@ var outputRoot = Path.Combine(testRoot, "output");
 Directory.CreateDirectory(sourceRoot);
 Directory.CreateDirectory(outputRoot);
 var sourcePath = Path.Combine(sourceRoot, "Проверка.pas");
+var workerControlPath = Path.Combine(testRoot, "worker-control.txt");
 
 var startInfo = new ProcessStartInfo
 {
@@ -42,14 +43,20 @@ if (isNet10)
 startInfo.ArgumentList.Add(workerPath);
 startInfo.ArgumentList.Add("2");
 startInfo.ArgumentList.Add("0");
+startInfo.Environment["PABC_COMPILER_WORKER_REQUEST_TIMEOUT_MS"] = "10000";
+startInfo.Environment["PABC_COMPILER_WORKER_TEST_CONTROL_FILE"] = workerControlPath;
 
 using var process = new Process { StartInfo = startInfo };
 var stderr = new StringBuilder();
+var stderrLock = new object();
 var processStarted = false;
 process.ErrorDataReceived += (_, eventArgs) =>
 {
     if (eventArgs.Data is not null)
-        stderr.AppendLine(eventArgs.Data);
+    {
+        lock (stderrLock)
+            stderr.AppendLine(eventArgs.Data);
+    }
 };
 
 try
@@ -144,22 +151,71 @@ try
         await CheckRedirectedExceptionAsync(exceptionOutput!, sourceRoot);
     }
 
-    var shutdown = await SendAsync(process, new { id = 22, command = "shutdown" });
+    var largeComment = new string('Ж', 1_000_000);
+    var largeSource = "begin\n  Println('Большой кириллический запрос');\nend.\n//" +
+                      largeComment;
+    var largeCompile = await CompileAsync(
+        process, 23, sourcePath, outputRoot,
+        sourceFiles: new[] { new SourceFileInput(sourcePath, largeSource) });
+    CheckSuccess(largeCompile, "large Cyrillic request");
+
+    const string stderrStart = "WORKER_STDERR_НАЧАЛО_";
+    const string stderrEnd = "_WORKER_STDERR_КОНЕЦ";
+    var stderrMessage = stderrStart + new string('Я', 128_000) + stderrEnd;
+    await File.WriteAllTextAsync(
+        workerControlPath,
+        "stderr-base64:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(stderrMessage)),
+        new UTF8Encoding(false));
+    var stderrPing = await SendAsync(process, new { id = 24, command = "ping" });
+    CheckSuccess(stderrPing, "ping while worker writes stderr");
+    await WaitForTextAsync(stderr, stderrLock, stderrStart, stderrEnd);
+    Check(true, "worker stderr did not corrupt controller JSON Lines");
+
+    var crashedWorkerPid = stderrPing.GetProperty("workerPid").GetInt32();
+    using (var crashedWorker = Process.GetProcessById(crashedWorkerPid))
+    {
+        crashedWorker.Kill(entireProcessTree: true);
+        Check(crashedWorker.WaitForExit(10_000), "crashed worker process exited");
+    }
+    var pingAfterCrash = await SendAsync(process, new { id = 25, command = "ping" });
+    CheckSuccess(pingAfterCrash, "automatic restart after worker crash");
+    Check(pingAfterCrash.GetProperty("workerPid").GetInt32() != crashedWorkerPid,
+        "worker PID changed after crash");
+
+    var hungWorkerPid = pingAfterCrash.GetProperty("workerPid").GetInt32();
+    await File.WriteAllTextAsync(
+        workerControlPath, "hang:30000", new UTF8Encoding(false));
+    var hangStopwatch = Stopwatch.StartNew();
+    var pingAfterHang = await SendAsync(process, new { id = 26, command = "ping" });
+    hangStopwatch.Stop();
+    CheckSuccess(pingAfterHang, "automatic restart after worker timeout");
+    Check(pingAfterHang.GetProperty("workerPid").GetInt32() != hungWorkerPid,
+        "worker PID changed after timeout");
+    Check(hangStopwatch.Elapsed < TimeSpan.FromSeconds(25),
+        "worker timeout remained bounded");
+
+    var finalWorkerPid = pingAfterHang.GetProperty("workerPid").GetInt32();
+
+    var shutdown = await SendAsync(process, new { id = 27, command = "shutdown" });
     CheckSuccess(shutdown, "shutdown");
     Check(shutdown.GetProperty("result").GetString() == "shutdown",
         "Controller acknowledged shutdown");
     Check(process.WaitForExit(10_000), "Controller exited after shutdown");
     Check(process.ExitCode == 0, "Controller exit code is zero");
+    Check(!IsProcessRunning(finalWorkerPid), "Worker exited with Controller");
 
     Console.WriteLine($"All {options.Target} compiler-controller smoke checks passed.");
 }
 catch (Exception exception)
 {
     Console.Error.WriteLine(exception);
-    if (stderr.Length > 0)
+    lock (stderrLock)
     {
-        Console.Error.WriteLine("Controller stderr:");
-        Console.Error.WriteLine(stderr);
+        if (stderr.Length > 0)
+        {
+            Console.Error.WriteLine("Controller stderr:");
+            Console.Error.WriteLine(stderr);
+        }
     }
     Environment.ExitCode = 1;
 }
@@ -502,6 +558,40 @@ static async Task<JsonElement> SendAsync(Process process, object request)
 
     using var document = JsonDocument.Parse(line);
     return document.RootElement.Clone();
+}
+
+static async Task WaitForTextAsync(
+    StringBuilder text,
+    object syncRoot,
+    string firstMarker,
+    string secondMarker)
+{
+    var finishTime = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 10;
+    while (Stopwatch.GetTimestamp() < finishTime)
+    {
+        lock (syncRoot)
+        {
+            var value = text.ToString();
+            if (value.Contains(firstMarker, StringComparison.Ordinal) &&
+                value.Contains(secondMarker, StringComparison.Ordinal))
+                return;
+        }
+        await Task.Delay(25);
+    }
+    throw new TimeoutException("Worker stderr markers were not received.");
+}
+
+static bool IsProcessRunning(int processId)
+{
+    try
+    {
+        using var process = Process.GetProcessById(processId);
+        return !process.HasExited;
+    }
+    catch (ArgumentException)
+    {
+        return false;
+    }
 }
 
 static void CheckSuccess(JsonElement response, string operation)

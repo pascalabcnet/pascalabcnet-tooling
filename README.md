@@ -7,7 +7,7 @@ The repository contains four production projects:
 - `PascalABCNet.LanguageServices` - document storage and an editor-neutral adapter over the PascalABC.NET semantic and code-completion APIs;
 - `PascalABCNet.LanguageServer` - an LSP server using StreamJsonRpc and standard input/output transport.
 - `PascalABCNet.CompilerController` - a JSON Lines controller used by editor integrations to manage compiler worker lifetime and compile per-request snapshots of unsaved documents;
-- `PascalABCNet.CompilerWorker` - an isolated PascalABC.NET compilation process reached by the controller over loopback NetMQ.
+- `PascalABCNet.CompilerWorker` - an isolated PascalABC.NET compilation process reached by the controller over redirected standard input/output.
 
 The PascalABC.NET compiler is included as the `pascalabcnet` Git submodule. The tooling repository does not contain a copied compiler source tree.
 
@@ -48,7 +48,7 @@ The LSP test starts the server as a separate process and verifies initialize, in
 dotnet run --project LanguageServerSmokeTest/LanguageServerSmokeTest.csproj
 ```
 
-The compiler-controller test builds both .NET Framework 4.7.2 and .NET 10 hosts, then verifies successful and failed compilation, repeated requests, automatic worker restart, and shutdown. For .NET 10 it also runs the PascalABC.NET `__RedirectIOMode` protocol end to end, including output without a newline, Cyrillic input/output, `Readln`, and runtime exceptions:
+The compiler-controller test builds both .NET Framework 4.7.2 and .NET 10 hosts, then verifies successful and failed compilation, repeated and large Cyrillic requests, worker crash and timeout recovery, stderr isolation, automatic restart, and shutdown. For .NET 10 it also runs the PascalABC.NET `__RedirectIOMode` protocol end to end, including output without a newline, Cyrillic input/output, `Readln`, and runtime exceptions:
 
 ```powershell
 .\scripts\test-compiler-host.ps1 -Target all

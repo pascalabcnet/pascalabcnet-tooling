@@ -16,10 +16,6 @@
     <UseAppHost>false</UseAppHost>
   </PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="NetMQ" Version="4.0.4.3" />
-  </ItemGroup>
-
   <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net472"
                       Version="1.0.3"

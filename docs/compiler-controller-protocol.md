@@ -2,7 +2,12 @@
 
 `PABCCompilerController` is an editor-neutral process that reads one JSON request per line from standard input and writes exactly one JSON response per line to standard output. Operational logs and worker output are written only to standard error.
 
-The controller starts `ZMQServerPas` on a free loopback TCP port. NetMQ is an internal controller-to-worker transport and is not exposed to editor integrations.
+The controller starts `ZMQServerPas` as an isolated child process. Its internal
+transport is also JSON Lines, carried over the worker's redirected standard
+input and output. Worker stdout is reserved exclusively for protocol messages;
+worker diagnostics are continuously drained from stderr and forwarded to the
+controller's stderr. The historical `ZMQServerPas` assembly name is retained
+for deployment compatibility; no ZMQ or network transport is used.
 
 ## Commands
 
@@ -78,6 +83,13 @@ Every response repeats `id` and contains `success`. Compile responses also conta
 
 ## Lifecycle
 
-The controller serializes requests and owns one compiler worker. It restarts that worker after the configured compilation-count or memory threshold and recovers it after failures. The optional command-line arguments are worker path, maximum compilation count, and maximum working-set size in MB.
+The controller serializes requests and owns one compiler worker. It restarts
+that worker after the configured compilation-count or memory threshold and
+recovers it after crashes or request timeouts. A timed-out protocol stream is
+never reused: the old worker is terminated and the request is retried once in a
+new worker. The default request timeout is 30 seconds and may be overridden
+with `PABC_COMPILER_WORKER_REQUEST_TIMEOUT_MS`. Graceful shutdown is attempted first and is bounded before forced
+termination. The optional command-line arguments remain worker path, maximum
+compilation count, and maximum working-set size in MB.
 
 Both projects target .NET Framework 4.7.2 and .NET 10. Build them with `scripts/build-compiler-host.ps1`; validate both runtimes with `scripts/test-compiler-host.ps1`.

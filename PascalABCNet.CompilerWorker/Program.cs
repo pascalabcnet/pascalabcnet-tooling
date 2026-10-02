@@ -2,9 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
 using Languages.Integration;
-using NetMQ;
-using NetMQ.Sockets;
 using PascalABCCompiler;
 using PascalABCCompiler.Errors;
 #if NETFRAMEWORK
@@ -29,6 +28,19 @@ internal static class Program
     {
         public string? fileName { get; set; }
         public string? text { get; set; }
+    }
+
+    private sealed class WorkerTransportRequest
+    {
+        public string? command { get; set; }
+        public string? payload { get; set; }
+    }
+
+    private sealed class WorkerTransportResponse
+    {
+        public bool success { get; set; }
+        public string? response { get; set; }
+        public string? error { get; set; }
     }
 
     private sealed class SourceFileSnapshot
@@ -90,13 +102,38 @@ internal static class Program
     private static CompileRequest DeserializeCompileRequest(string json)
     {
 #if NETFRAMEWORK
-        return new JavaScriptSerializer().Deserialize<CompileRequest>(json)
+        return CreateJsonSerializer().Deserialize<CompileRequest>(json)
                ?? throw new InvalidDataException("JSON-запрос не содержит объекта");
 #else
         return JsonSerializer.Deserialize<CompileRequest>(json)
                ?? throw new InvalidDataException("JSON-запрос не содержит объекта");
 #endif
     }
+
+    private static WorkerTransportRequest DeserializeTransportRequest(string json)
+    {
+#if NETFRAMEWORK
+        return CreateJsonSerializer().Deserialize<WorkerTransportRequest>(json)
+               ?? throw new InvalidDataException("JSON-запрос не содержит объекта");
+#else
+        return JsonSerializer.Deserialize<WorkerTransportRequest>(json)
+               ?? throw new InvalidDataException("JSON-запрос не содержит объекта");
+#endif
+    }
+
+    private static string SerializeTransportResponse(WorkerTransportResponse response)
+    {
+#if NETFRAMEWORK
+        return CreateJsonSerializer().Serialize(response);
+#else
+        return JsonSerializer.Serialize(response);
+#endif
+    }
+
+#if NETFRAMEWORK
+    private static JavaScriptSerializer CreateJsonSerializer() =>
+        new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+#endif
 
     private static string CompileFile(Compiler compiler, string requestJson)
     {
@@ -317,26 +354,42 @@ internal static class Program
         return result;
     }
 
+    private static void ApplyTestControl()
+    {
+        var fileName = Environment.GetEnvironmentVariable(
+            "PABC_COMPILER_WORKER_TEST_CONTROL_FILE");
+        if (string.IsNullOrWhiteSpace(fileName) || !File.Exists(fileName))
+            return;
+
+        var command = File.ReadAllText(fileName, Encoding.UTF8);
+        File.Delete(fileName);
+
+        const string hangPrefix = "hang:";
+        if (command.StartsWith(hangPrefix, StringComparison.Ordinal) &&
+            int.TryParse(command.Substring(hangPrefix.Length), out var milliseconds) &&
+            milliseconds > 0)
+        {
+            Thread.Sleep(milliseconds);
+            return;
+        }
+
+        const string stderrPrefix = "stderr-base64:";
+        if (command.StartsWith(stderrPrefix, StringComparison.Ordinal))
+        {
+            var bytes = Convert.FromBase64String(
+                command.Substring(stderrPrefix.Length));
+            Console.Error.WriteLine(Encoding.UTF8.GetString(bytes));
+            Console.Error.Flush();
+        }
+    }
+
     private static int Main(string[] args)
     {
         Console.InputEncoding = new UTF8Encoding(false);
         Console.OutputEncoding = new UTF8Encoding(false);
-
-        if (args.Length == 0)
-        {
-            Console.Error.WriteLine(
-                "Ошибка: требуется аргумент с номером TCP-порта");
-            return 1;
-        }
-
-        if (!int.TryParse(args[0], out var port) || port is < 1 or > 65535)
-        {
-            Console.Error.WriteLine(
-                "Ошибка: некорректный номер TCP-порта: " + args[0]);
-            return 1;
-        }
-
-        var address = "tcp://127.0.0.1:" + port;
+        var protocolOutput = Console.Out;
+        // Keep stdout protocol-only even if compiler code writes to Console.Out.
+        Console.SetOut(Console.Error);
 
         try
         {
@@ -347,44 +400,68 @@ internal static class Program
             LanguageIntegrator.LoadAllLanguages();
 
             var compiler = new Compiler();
-            using var server = new ResponseSocket();
-            server.Bind(address);
-
-            Console.WriteLine("PascalABC.NET compiler server started");
-            Console.WriteLine("Address: " + address);
+            Console.Error.WriteLine("PascalABC.NET compiler worker started");
+            Console.Error.Flush();
 
             var running = true;
             while (running)
             {
-                var request = server.ReceiveFrameString();
-                switch (request)
+                var inputLine = Console.ReadLine();
+                if (inputLine == null)
+                    break;
+                if (string.IsNullOrWhiteSpace(inputLine))
+                    continue;
+
+                ApplyTestControl();
+                var transportResponse = new WorkerTransportResponse();
+                try
                 {
-                    case "#PING":
-                        server.SendFrame("PONG");
-                        break;
+                    var request = DeserializeTransportRequest(inputLine);
+                    switch ((request.command ?? "").ToLowerInvariant())
+                    {
+                        case "ping":
+                            transportResponse.success = true;
+                            transportResponse.response = "PONG";
+                            break;
 
-                    case "#SHUTDOWN":
-                        server.SendFrame("BYE");
-                        running = false;
-                        break;
+                        case "shutdown":
+                            transportResponse.success = true;
+                            transportResponse.response = "BYE";
+                            running = false;
+                            break;
 
-                    default:
-                        server.SendFrame(CompileFile(compiler, request));
-                        break;
+                        case "compile":
+                            transportResponse.success = true;
+                            transportResponse.response = CompileFile(
+                                compiler, request.payload ?? "");
+                            break;
+
+                        default:
+                            throw new InvalidDataException(
+                                "Неизвестная команда Worker: " + request.command);
+                    }
                 }
+                catch (Exception exception)
+                {
+                    transportResponse.success = false;
+                    transportResponse.error = exception.ToString();
+                    Console.Error.WriteLine(exception);
+                    Console.Error.Flush();
+                }
+
+                protocolOutput.WriteLine(
+                    SerializeTransportResponse(transportResponse));
+                protocolOutput.Flush();
             }
 
-            Console.WriteLine("PascalABC.NET compiler server stopped");
+            Console.Error.WriteLine("PascalABC.NET compiler worker stopped");
+            Console.Error.Flush();
             return 0;
         }
         catch (Exception exception)
         {
             Console.Error.WriteLine(exception);
             return 1;
-        }
-        finally
-        {
-            NetMQConfig.Cleanup();
         }
     }
 }

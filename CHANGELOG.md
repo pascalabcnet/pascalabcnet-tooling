@@ -20,6 +20,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - Compiler-host ownership moved from the VS Code extension to the shared Tooling repository.
+- Replaced the internal Controller-to-Worker loopback NetMQ transport with
+  JSON Lines over redirected standard input/output while preserving the public
+  controller protocol and command line.
+- Worker stdout is now reserved for protocol traffic; diagnostics use stderr.
+
+### Removed
+
+- NetMQ and its unused AsyncIO and NaCl transport dependencies.
+
+### Fixed
+
+- Added bounded recovery coverage for worker crashes and hangs, large Cyrillic
+  requests, stderr isolation, and coordinated Controller/Worker shutdown.
+- Increased the .NET Framework JSON size limit so large document snapshots are
+  handled consistently with .NET 10.
 
 ### Planned
 

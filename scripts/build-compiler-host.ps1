@@ -84,13 +84,6 @@ function Build-Target {
     Get-ChildItem -LiteralPath $destination -File -Filter '*.pdb' |
         Remove-Item -Force
 
-    # NetMQ includes NaCl.Net only for optional CURVE encryption. The compiler
-    # host uses an unencrypted loopback connection and does not load it.
-    $unusedNaCl = Join-Path $destination 'NaCl.dll'
-    if (Test-Path -LiteralPath $unusedNaCl -PathType Leaf) {
-        Remove-Item -LiteralPath $unusedNaCl -Force
-    }
-
     if ($Framework -eq 'net472') {
         Assert-FileExists (Join-Path $destination 'PABCCompilerController.exe')
         Assert-FileExists (Join-Path $destination 'ZMQServerPas.exe')
@@ -107,7 +100,12 @@ function Build-Target {
         }
     }
 
-    Assert-FileExists (Join-Path $destination 'NetMQ.dll')
+    foreach ($removedDependency in @('NetMQ.dll', 'AsyncIO.dll', 'NaCl.dll')) {
+        $removedDependencyPath = Join-Path $destination $removedDependency
+        if (Test-Path -LiteralPath $removedDependencyPath -PathType Leaf) {
+            throw "Removed transport dependency is still present: $removedDependencyPath"
+        }
+    }
     Write-Host "Compiler host built: $destination"
 }
 

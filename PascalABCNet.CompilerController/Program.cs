@@ -2,13 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Net;
-using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
-using NetMQ;
-using NetMQ.Sockets;
+using System.Threading.Tasks;
 #if NETFRAMEWORK
 using System.Web.Script.Serialization;
 #else
@@ -43,38 +40,47 @@ internal static class Program
         public SourceFileRequest[]? sourceFiles { get; set; }
     }
 
-    private static RequestSocket CreateClient(string address)
+    private sealed class WorkerTransportRequest
     {
-        var client = new RequestSocket();
-        client.Options.Linger = TimeSpan.Zero;
-        client.Connect(address);
-        return client;
+        public string? command { get; set; }
+        public string? payload { get; set; }
     }
 
-    private static void DisposeClient(ref RequestSocket? client)
+    private sealed class WorkerTransportResponse
     {
-        client?.Dispose();
-        client = null;
+        public bool success { get; set; }
+        public string? response { get; set; }
+        public string? error { get; set; }
+    }
+
+    private sealed class WorkerConnection : IDisposable
+    {
+        public WorkerConnection(Process process)
+        {
+            Process = process;
+            Input = new StreamWriter(
+                process.StandardInput.BaseStream,
+                new UTF8Encoding(false));
+            Output = process.StandardOutput;
+        }
+
+        public Process Process { get; }
+        public StreamWriter Input { get; }
+        public StreamReader Output { get; }
+        public bool IsUsable { get; set; } = true;
+
+        public void Dispose()
+        {
+            Input.Dispose();
+            Output.Dispose();
+            Process.Dispose();
+        }
     }
 
     private static void Log(string message)
     {
         Console.Error.WriteLine(message);
         Console.Error.Flush();
-    }
-
-    private static int GetFreeLocalPort()
-    {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        try
-        {
-            listener.Start();
-            return ((IPEndPoint)listener.LocalEndpoint).Port;
-        }
-        finally
-        {
-            listener.Stop();
-        }
     }
 
     private static void WriteJson(Dictionary<string, object?> response)
@@ -86,20 +92,36 @@ internal static class Program
     private static string SerializeJson(object value)
     {
 #if NETFRAMEWORK
-        return new JavaScriptSerializer().Serialize(value);
+        return CreateJsonSerializer().Serialize(value);
 #else
         return JsonSerializer.Serialize(value);
 #endif
     }
 
+#if NETFRAMEWORK
+    private static JavaScriptSerializer CreateJsonSerializer() =>
+        new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+#endif
+
     private static ControllerRequest DeserializeRequest(string json)
     {
 #if NETFRAMEWORK
-        return new JavaScriptSerializer().Deserialize<ControllerRequest>(json)
+        return CreateJsonSerializer().Deserialize<ControllerRequest>(json)
                ?? throw new InvalidDataException("JSON-запрос не содержит объекта");
 #else
         return JsonSerializer.Deserialize<ControllerRequest>(json)
                ?? throw new InvalidDataException("JSON-запрос не содержит объекта");
+#endif
+    }
+
+    private static WorkerTransportResponse DeserializeWorkerResponse(string json)
+    {
+#if NETFRAMEWORK
+        return CreateJsonSerializer().Deserialize<WorkerTransportResponse>(json)
+               ?? throw new InvalidDataException("Worker вернул пустой JSON-ответ");
+#else
+        return JsonSerializer.Deserialize<WorkerTransportResponse>(json)
+               ?? throw new InvalidDataException("Worker вернул пустой JSON-ответ");
 #endif
     }
 
@@ -115,11 +137,11 @@ internal static class Program
     private static string QuoteArgument(string value) =>
         "\"" + value.Replace("\"", "\\\"") + "\"";
 
-    private static Process StartWorker(string workerFileName, int port)
+    private static WorkerConnection StartWorker(string workerFileName)
     {
         if (!File.Exists(workerFileName))
             throw new FileNotFoundException(
-                "Не найден ZMQServerPas: " + workerFileName,
+                "Не найден CompilerWorker: " + workerFileName,
                 workerFileName);
 
         var workerIsDotNetAssembly = string.Equals(
@@ -131,15 +153,17 @@ internal static class Program
         {
             FileName = workerIsDotNetAssembly ? "dotnet" : workerFileName,
             Arguments = workerIsDotNetAssembly
-                ? QuoteArgument(workerFileName) + " " + port
-                : port.ToString(),
+                ? QuoteArgument(workerFileName)
+                : "",
             WorkingDirectory = Path.GetDirectoryName(workerFileName) ??
                                AppDomain.CurrentDomain.BaseDirectory,
             UseShellExecute = false,
             CreateNoWindow = true,
-            // stdout контроллера используется только для JSON Lines.
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
-            RedirectStandardError = true
+            RedirectStandardError = true,
+            StandardOutputEncoding = new UTF8Encoding(false),
+            StandardErrorEncoding = new UTF8Encoding(false)
         };
 
         var worker = new Process
@@ -148,11 +172,6 @@ internal static class Program
             EnableRaisingEvents = true
         };
 
-        worker.OutputDataReceived += (_, eventArgs) =>
-        {
-            if (eventArgs.Data != null)
-                Log("[worker] " + eventArgs.Data);
-        };
         worker.ErrorDataReceived += (_, eventArgs) =>
         {
             if (eventArgs.Data != null)
@@ -162,177 +181,182 @@ internal static class Program
         if (!worker.Start())
         {
             worker.Dispose();
-            throw new InvalidOperationException("Не удалось запустить ZMQServerPas");
+            throw new InvalidOperationException("Не удалось запустить CompilerWorker");
         }
 
-        worker.BeginOutputReadLine();
         worker.BeginErrorReadLine();
-        return worker;
+        return new WorkerConnection(worker);
     }
 
-    private static void WaitUntilReady(
-        Process worker,
-        string address,
-        ref RequestSocket? client)
+    private static void WaitUntilReady(WorkerConnection connection)
     {
-        var finishTime = DateTime.UtcNow.AddSeconds(10);
+        if (TrySendWorkerRequest(
+                connection,
+                new WorkerTransportRequest { command = "ping" },
+                TimeSpan.FromSeconds(10),
+                out var response) && response == "PONG")
+            return;
 
-        while (DateTime.UtcNow < finishTime)
-        {
-            if (worker.HasExited)
-                throw new InvalidOperationException(
-                    "ZMQServerPas завершился с кодом " + worker.ExitCode);
-
-            DisposeClient(ref client);
-            client = CreateClient(address);
-
-            try
-            {
-                client.SendFrame("#PING");
-                if (client.TryReceiveFrameString(
-                        TimeSpan.FromMilliseconds(500),
-                        out var response) && response == "PONG")
-                    return;
-            }
-            catch
-            {
-                // Worker ещё может не успеть открыть сокет.
-            }
-
-            Thread.Sleep(100);
-        }
-
-        throw new TimeoutException("ZMQServerPas не ответил на #PING за 10 секунд");
+        throw new TimeoutException("CompilerWorker не ответил на ping за 10 секунд");
     }
 
     private static void StartWorkerAndConnect(
         string workerFileName,
-        int port,
-        string address,
-        ref Process? worker,
-        ref RequestSocket? client)
+        ref WorkerConnection? connection)
     {
-        worker = StartWorker(workerFileName, port);
+        connection = StartWorker(workerFileName);
         try
         {
-            WaitUntilReady(worker, address, ref client);
+            WaitUntilReady(connection);
         }
         catch
         {
+            var worker = connection.Process;
             if (!worker.HasExited)
                 worker.Kill();
-            worker.Dispose();
-            worker = null;
-            DisposeClient(ref client);
+            connection.Dispose();
+            connection = null;
             throw;
         }
 
-        Log("ZMQServerPas запущен, PID = " + worker.Id);
+        Log("CompilerWorker запущен, PID = " + connection.Process.Id);
     }
 
-    private static void StopWorker(
-        string address,
-        ref Process? worker,
-        ref RequestSocket? client)
+    private static void StopWorker(ref WorkerConnection? connection)
     {
-        DisposeClient(ref client);
-        if (worker == null)
+        if (connection == null)
             return;
 
+        var worker = connection.Process;
         if (!worker.HasExited)
         {
-            RequestSocket? shutdownClient = null;
-            try
+            if (connection.IsUsable)
             {
-                shutdownClient = CreateClient(address);
-                shutdownClient.SendFrame("#SHUTDOWN");
-                shutdownClient.TryReceiveFrameString(
-                    TimeSpan.FromMilliseconds(500), out _);
-            }
-            catch
-            {
-                // При невозможности штатного завершения worker будет остановлен принудительно.
-            }
-            finally
-            {
-                DisposeClient(ref shutdownClient);
+                TrySendWorkerRequest(
+                    connection,
+                    new WorkerTransportRequest { command = "shutdown" },
+                    TimeSpan.FromMilliseconds(500),
+                    out _);
             }
 
             if (!worker.WaitForExit(1500))
                 worker.Kill();
         }
 
-        worker.Dispose();
-        worker = null;
+        connection.Dispose();
+        connection = null;
     }
 
     private static void RestartWorker(
         string workerFileName,
-        int port,
-        string address,
-        ref Process? worker,
-        ref RequestSocket? client)
+        ref WorkerConnection? connection)
     {
-        Log("Перезапуск ZMQServerPas");
-        StopWorker(address, ref worker, ref client);
+        Log("Перезапуск CompilerWorker");
+        StopWorker(ref connection);
         Thread.Sleep(100);
-        StartWorkerAndConnect(
-            workerFileName, port, address, ref worker, ref client);
+        StartWorkerAndConnect(workerFileName, ref connection);
     }
 
-    private static bool TrySendRequest(
-        RequestSocket client,
-        string request,
+    private static bool WaitForTask(
+        Task task,
+        Process worker,
+        Stopwatch stopwatch,
+        TimeSpan timeout)
+    {
+        while (!task.Wait(50))
+        {
+            if (worker.HasExited || stopwatch.Elapsed >= timeout)
+                return false;
+        }
+        return true;
+    }
+
+    private static bool TrySendWorkerRequest(
+        WorkerConnection connection,
+        WorkerTransportRequest request,
         TimeSpan timeout,
         out string response)
     {
         try
         {
-            client.SendFrame(request);
-            if (client.TryReceiveFrameString(timeout, out var received) &&
-                received != null)
-            {
-                response = received;
-                return true;
-            }
+            if (!connection.IsUsable || connection.Process.HasExited)
+                throw new EndOfStreamException("CompilerWorker уже завершён");
 
-            response = "";
-            return false;
+            var stopwatch = Stopwatch.StartNew();
+            var writeTask = connection.Input.WriteLineAsync(SerializeJson(request));
+            if (!WaitForTask(writeTask, connection.Process, stopwatch, timeout))
+                throw new TimeoutException("Тайм-аут записи запроса CompilerWorker");
+            var flushTask = connection.Input.FlushAsync();
+            if (!WaitForTask(flushTask, connection.Process, stopwatch, timeout))
+                throw new TimeoutException("Тайм-аут отправки запроса CompilerWorker");
+
+            var readTask = connection.Output.ReadLineAsync();
+            if (!WaitForTask(readTask, connection.Process, stopwatch, timeout))
+                throw new TimeoutException("Тайм-аут ответа CompilerWorker");
+            var line = readTask.GetAwaiter().GetResult();
+            if (line == null)
+                throw new EndOfStreamException("CompilerWorker закрыл stdout");
+
+            var transportResponse = DeserializeWorkerResponse(line);
+            if (!transportResponse.success)
+                throw new InvalidDataException(
+                    transportResponse.error ?? "CompilerWorker вернул ошибку");
+
+            response = transportResponse.response ?? "";
+            return true;
         }
-        catch
+        catch (Exception exception)
         {
+            connection.IsUsable = false;
+            Log("Ошибка обмена с CompilerWorker: " + exception.Message);
             response = "";
             return false;
         }
     }
 
     private static string SendRequest(
-        string request,
+        string command,
+        string? payload,
         string workerFileName,
-        int port,
-        string address,
-        ref Process? worker,
-        ref RequestSocket? client)
+        ref WorkerConnection? connection)
     {
+        var requestTimeout = GetWorkerRequestTimeout();
         for (var attempt = 1; attempt <= 2; attempt++)
         {
-            if (client != null && TrySendRequest(
-                    client, request, TimeSpan.FromMinutes(5), out var response))
+            if (connection != null && TrySendWorkerRequest(
+                    connection,
+                    new WorkerTransportRequest
+                    {
+                        command = command,
+                        payload = payload
+                    },
+                    requestTimeout,
+                    out var response))
                 return response;
 
             if (attempt == 1)
             {
-                Log("ZMQServerPas не ответил. Выполняется перезапуск");
-                RestartWorker(
-                    workerFileName, port, address, ref worker, ref client);
+                Log("CompilerWorker не ответил. Выполняется перезапуск");
+                RestartWorker(workerFileName, ref connection);
             }
         }
 
-        throw new InvalidOperationException("Не удалось получить ответ от ZMQServerPas");
+        throw new InvalidOperationException("Не удалось получить ответ от CompilerWorker");
     }
 
-    private static long GetWorkingSetMb(Process? worker)
+    private static TimeSpan GetWorkerRequestTimeout()
     {
+        const int defaultTimeoutMilliseconds = 30 * 1000;
+        var value = Environment.GetEnvironmentVariable(
+            "PABC_COMPILER_WORKER_REQUEST_TIMEOUT_MS");
+        return int.TryParse(value, out var milliseconds) && milliseconds > 0
+            ? TimeSpan.FromMilliseconds(milliseconds)
+            : TimeSpan.FromMilliseconds(defaultTimeoutMilliseconds);
+    }
+
+    private static long GetWorkingSetMb(WorkerConnection? connection)
+    {
+        var worker = connection?.Process;
         if (worker == null || worker.HasExited)
             return 0;
         worker.Refresh();
@@ -447,22 +471,16 @@ internal static class Program
 
         var workerFileName = Path.GetFullPath(
             args.Length >= 1 ? args[0] : GetDefaultWorkerFileName());
-        var port = GetFreeLocalPort();
         var maxCompilations = args.Length >= 2 ? int.Parse(args[1]) : 0;
         var maxWorkingSetMb = args.Length >= 3 ? long.Parse(args[2]) : 0;
-        var address = "tcp://127.0.0.1:" + port;
 
-        Log("Адрес ZMQServerPas: " + address);
-
-        Process? worker = null;
-        RequestSocket? client = null;
+        WorkerConnection? connection = null;
         var compilationCount = 0;
         var running = true;
 
         try
         {
-            StartWorkerAndConnect(
-                workerFileName, port, address, ref worker, ref client);
+            StartWorkerAndConnect(workerFileName, ref connection);
             Log("PABCCompilerController готов");
 
             while (running)
@@ -487,13 +505,12 @@ internal static class Program
                         case "ping":
                         {
                             var workerResponse = SendRequest(
-                                "#PING", workerFileName, port, address,
-                                ref worker, ref client);
+                                "ping", null, workerFileName, ref connection);
                             var response = CreateResponse(
                                 requestId, workerResponse == "PONG");
                             response["result"] = workerResponse;
-                            response["workerPid"] = worker!.Id;
-                            response["workingSetMB"] = GetWorkingSetMb(worker);
+                            response["workerPid"] = connection!.Process.Id;
+                            response["workingSetMB"] = GetWorkingSetMb(connection);
                             WriteJson(response);
                             break;
                         }
@@ -542,15 +559,15 @@ internal static class Program
                                     sourceFiles = sourceFiles
                                 });
                             var workerResponse = SendRequest(
-                                workerRequest, workerFileName, port, address,
-                                ref worker, ref client);
+                                "compile", workerRequest, workerFileName,
+                                ref connection);
                             compilationCount++;
-                            var workingSetMb = GetWorkingSetMb(worker);
+                            var workingSetMb = GetWorkingSetMb(connection);
                             var response = CreateResponse(requestId, false);
                             ParseCompileResponse(workerResponse, fileName, response);
                             response["fileName"] = fileName;
                             response["compilationCount"] = compilationCount;
-                            response["workerPid"] = worker!.Id;
+                            response["workerPid"] = connection!.Process.Id;
                             response["workingSetMB"] = workingSetMb;
                             WriteJson(response);
 
@@ -563,22 +580,18 @@ internal static class Program
                                                   workingSetMb >= maxWorkingSetMb;
                             if (restartByCount || restartByMemory)
                             {
-                                RestartWorker(
-                                    workerFileName, port, address,
-                                    ref worker, ref client);
+                                RestartWorker(workerFileName, ref connection);
                                 compilationCount = 0;
                             }
                             break;
                         }
                         case "restart":
                         {
-                            RestartWorker(
-                                workerFileName, port, address,
-                                ref worker, ref client);
+                            RestartWorker(workerFileName, ref connection);
                             compilationCount = 0;
                             var response = CreateResponse(requestId, true);
                             response["result"] = "restarted";
-                            response["workerPid"] = worker!.Id;
+                            response["workerPid"] = connection!.Process.Id;
                             WriteJson(response);
                             break;
                         }
@@ -616,8 +629,7 @@ internal static class Program
         }
         finally
         {
-            StopWorker(address, ref worker, ref client);
-            NetMQConfig.Cleanup();
+            StopWorker(ref connection);
         }
 
         return 0;
