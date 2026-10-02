@@ -2,11 +2,11 @@
   <Project Path="PascalABCNet.LanguageServices/PascalABCNet.LanguageServices.csproj" />
   <Project Path="PascalABCNet.LanguageServer/PascalABCNet.LanguageServer.csproj" />
   <Folder Name="/compiler-host/">
-    <Project Path="PascalABCNet.CompilerController/PascalABCNet.CompilerController.csproj" />
-    <Project Path="PascalABCNet.CompilerWorker/PascalABCNet.CompilerWorker.csproj" />
+    <Project Path="pascalabcnet/PascalABCNet.CompilerController/PascalABCNet.CompilerController.csproj" />
+    <Project Path="pascalabcnet/PascalABCNet.CompilerWorker/PascalABCNet.CompilerWorker.csproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="CompilerControllerSmokeTest/CompilerControllerSmokeTest.csproj" />
+    <Project Path="pascalabcnet/CompilerControllerSmokeTest/CompilerControllerSmokeTest.csproj" />
     <Project Path="HeadlessSmokeTest/HeadlessSmokeTest.csproj" />
     <Project Path="LanguageServerSmokeTest/LanguageServerSmokeTest.csproj" />
   </Folder>

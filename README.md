@@ -6,8 +6,8 @@ The repository contains four production projects:
 
 - `PascalABCNet.LanguageServices` - document storage and an editor-neutral adapter over the PascalABC.NET semantic and code-completion APIs;
 - `PascalABCNet.LanguageServer` - an LSP server using StreamJsonRpc and standard input/output transport.
-- `PascalABCNet.CompilerController` - a JSON Lines controller used by editor integrations to manage compiler worker lifetime and compile per-request snapshots of unsaved documents;
-- `PascalABCNet.CompilerWorker` - an isolated PascalABC.NET compilation process reached by the controller over redirected standard input/output.
+- `PascalABCNet.CompilerController` - a JSON Lines controller, maintained in the PascalABC.NET submodule, used by editor integrations to manage compiler worker lifetime and compile per-request snapshots of unsaved documents;
+- `PascalABCNet.CompilerWorker` - an isolated PascalABC.NET compilation process, maintained in the PascalABC.NET submodule and reached by the controller over redirected standard input/output.
 
 The PascalABC.NET compiler is included as the `pascalabcnet` Git submodule. The tooling repository does not contain a copied compiler source tree.
 
@@ -60,7 +60,7 @@ To build redistributable compiler-host binaries without running tests:
 .\scripts\build-compiler-host.ps1 -Target all
 ```
 
-The controller protocol and lifecycle are documented in [docs/compiler-controller-protocol.md](docs/compiler-controller-protocol.md).
+The controller protocol and lifecycle are documented in [pascalabcnet/docs/compiler-controller-protocol.md](pascalabcnet/docs/compiler-controller-protocol.md).
 
 ## Continuous integration
 

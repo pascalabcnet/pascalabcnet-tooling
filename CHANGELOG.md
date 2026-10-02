@@ -20,6 +20,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - Compiler-host ownership moved from the VS Code extension to the shared Tooling repository.
+- Canonical compiler-host projects, smoke tests, build scripts, and protocol
+  documentation moved to the PascalABC.NET submodule; Tooling now consumes
+  them without keeping source copies.
 - Replaced the internal Controller-to-Worker loopback NetMQ transport with
   JSON Lines over redirected standard input/output while preserving the public
   controller protocol and command line.
